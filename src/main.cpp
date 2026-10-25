@@ -12,7 +12,7 @@ static Audio AU;
 static Rng R;
 
 // ---------------------------------------------------------------- data
-enum { S_HQ, S_RELAY, S_SOLAR, S_BATTERY, S_MINER, S_LASER, S_MISSILE, S_REPAIR, S_SHIELD, S_N };
+enum { S_HQ, S_RELAY, S_SOLAR, S_BATTERY, S_MINER, S_LASER, S_MISSILE, S_REPAIR, S_SHIELD, S_CARRIER, S_RESEARCH, S_N };
 struct SDef { const char* name; const char* blurb; int cost; float hp, r, link, build; };
 static const SDef SD[S_N] = {
     { "COMMAND", "YOUR BASE. IF IT FALLS, YOU LOSE.", 0, 700, 34, 240, 0 },
@@ -24,8 +24,14 @@ static const SDef SD[S_N] = {
     { "MISSILE", "LONG RANGE HOMING. USES MINERALS.", 140, 170, 18, 150, 8 },
     { "REPAIR", "HEALS STRUCTURES NEARBY. USES ENERGY.", 110, 120, 16, 150, 7 },
     { "SHIELD", "ABSORBS FIRE NEARBY. USES ENERGY.", 160, 140, 18, 150, 9 },
+    { "CARRIER", "BUILDS FIGHTERS THAT ATTACK FOR YOU. MINERALS PER FIGHTER.", 180, 220, 22, 150, 10 },
+    { "RESEARCH", "SLOWLY STUDIES THE BELT FOR A NEW MINERAL. USES ENERGY.", 150, 120, 17, 150, 8 },
 };
-static const int BUILDS[8] = { S_RELAY, S_SOLAR, S_BATTERY, S_MINER, S_LASER, S_MISSILE, S_REPAIR, S_SHIELD };
+static const int NBUILD = 10;
+static const int BUILDS[NBUILD] = { S_RELAY, S_SOLAR, S_BATTERY, S_MINER, S_LASER, S_MISSILE, S_REPAIR, S_SHIELD, S_CARRIER, S_RESEARCH };
+// research: finding crystal refills every asteroid with a second, richer mineral
+static float researchTime(int lv) { return 360 / (1 + 0.4f * (lv - 1)); } // slow on purpose: a long-term investment worth defending
+static const float CRYSTAL_VALUE = 1.5f;
 static float lvm(int lv) { return 1 + 0.45f * (lv - 1); }
 static float rangeOf(int t, int lv) {
     switch (t) {
@@ -34,9 +40,15 @@ static float rangeOf(int t, int lv) {
     case S_MISSILE: return 430 * (1 + 0.10f * (lv - 1));
     case S_REPAIR: return 175 * (1 + 0.10f * (lv - 1));
     case S_SHIELD: return 140 * (1 + 0.15f * (lv - 1));
+    case S_CARRIER: return 650 * (1 + 0.15f * (lv - 1)); // how far from the carrier its fighters defend
     }
     return 0;
 }
+// carrier fighters
+static int carrierCap(int lv) { return 2 + lv; }
+static const float FTR_HP = 55, FTR_SPEED = 215, FTR_RANGE = 125, FTR_DMG = 6, FTR_CD = 0.45f, FTR_BUILD = 9, FTR_SIGHT = 300;
+static const int FTR_COST = 20;
+static const float SIGHT = 420; // raid mode: how far your structures can see
 static int upgCost(int t, int lv) { return t == S_HQ ? 250 * lv : std::max(20, (int)(SD[t].cost * 0.8f * lv)); }
 
 enum { E_SCOUT, E_FIGHTER, E_BOMBER, E_SWARM, E_MOTHER, E_N };
@@ -49,7 +61,7 @@ static const EDef ED[E_N] = {
     { "MOTHERSHIP", 3000, 24, 62, 20, 340, 0.5f, 100 },
 };
 
-enum { OBJ_MINE, OBJ_SURVIVE, OBJ_MOTHER, OBJ_ENDLESS, OBJ_VERSUS };
+enum { OBJ_MINE, OBJ_SURVIVE, OBJ_MOTHER, OBJ_ENDLESS, OBJ_VERSUS, OBJ_RAID };
 struct Mission { const char* name; const char* desc; int obj; float target, first, interval, diff, density; bool swarmy; };
 static const Mission MISSIONS[] = {
     { "FIRST LIGHT", "MINE 800 MINERALS. LIGHT RESISTANCE.", OBJ_MINE, 800, 50, 45, 0.6f, 1.1f, false },
@@ -62,19 +74,22 @@ static const Mission MISSIONS[] = {
 };
 static const int NMISSIONS = sizeof(MISSIONS) / sizeof(MISSIONS[0]);
 static const Mission M_ENDLESS = { "ENDLESS", "SURVIVE AS LONG AS YOU CAN.", OBJ_ENDLESS, 0, 50, 36, 1.0f, 1.0f, false };
+static const Mission M_RAID = { "RAID", "NO ALIENS. FIND YOUR NEIGHBORS AND DESTROY THEIR COMMANDS.", OBJ_RAID, 0, 1e9f, 1e9f, 0, 1.0f, false };
 static const Mission M_VERSUS = { "VERSUS", "DESTROY RIVAL COMMANDS, OR MINE 5000 FIRST.", OBJ_VERSUS, 5000, 100, 45, 0.55f, 1.0f, false };
 
 static const Col PCOL[4] = { Col(40, 220, 255), Col(255, 160, 40), Col(130, 255, 90), Col(255, 90, 210) };
-static const Col C_MIN(190, 140, 255), C_EN(250, 235, 100), C_ALIEN(255, 70, 70), C_AST(125, 145, 180), C_WHITE(255, 255, 255), C_DIM(120, 135, 160), C_GOOD(110, 255, 140), C_BAD(255, 80, 80);
+static const Col C_CRY(80, 255, 215), C_MIN(190, 140, 255), C_EN(250, 235, 100), C_ALIEN(255, 70, 70), C_AST(125, 145, 180), C_WHITE(255, 255, 255), C_DIM(120, 135, 160), C_GOOD(110, 255, 140), C_BAD(255, 80, 80);
 
 // ---------------------------------------------------------------- entities
-struct Asteroid { V2 p; float r, minerals, maxMin, rot, spin; std::vector<V2> shape, flecks; bool dead = false; int miners = 0; };
+struct Asteroid { V2 p; float r, minerals, maxMin, crystal = 0, rot, spin; std::vector<V2> shape, flecks; bool dead = false; int miners = 0; };
 struct Struct {
     int t, team, lv = 1; V2 p; float hp, maxhp, built = 0, cd = 0, charge = 0, flash = 0, invested = 0, doomT = -1, aim = 0, spin = 0, beamT = 0, chk = 0;
-    bool dead = false, connected = false, powered = false, mining = false; int ast = -1; int builder = -1;
+    float useAcc = 0, flow = 0; // resources passing through this structure (energy used + made + mined), for the link glow
+    bool dead = false, connected = false, powered = false, mining = false, cryBeam = false; int ast = -1; int builder = -1;
     float r() const { return SD[t].r; }
 };
 struct Enemy { int t, uid; V2 p, v; float hp, maxhp, cd, ang, flash = 0, retarget = 0, spawnCd = 0, orbit = 1; int tgt = -1; bool dead = false; };
+struct Fighter { int team, uid, home; V2 p, v; float ang, hp, maxhp, dmg, cd = 0, retarget = 0, flash = 0, orbitA = 0; int tk = 0, tid = -1; bool dead = false, sortie = false; }; // sortie: out raiding with its squadron. tk: 0 none, 1 alien uid, 2 fighter uid, 3 structure index
 struct Bullet { V2 p, v; float dmg, life, splash = 0; int team; bool missile = false; int tgtUid = -1, tgtStruct = -1; bool dead = false; };
 enum { P_SPARK, P_DOT, P_RING, P_DEBRIS };
 struct Part { V2 p, v; float life, max, a, b, rot, spin; Col c; int kind; };
@@ -83,7 +98,7 @@ struct Warn { V2 p; float t, budget; bool mother; };
 struct Ping { V2 p; float t; int player; };
 struct Team {
     bool used = false, alive = true; int hq = -1; Col col; float minerals = 0, energy = 0, ecap = 150, eprod = 0, drainAcc = 0, drainRate = 0, mined = 0, lostAt = -1;
-    int kills = 0, built = 0; bool dirty = true; std::vector<std::pair<int, int>> links;
+    int kills = 0, built = 0, ftrLost = 0; bool crystal = false; unsigned found = 0; int order = -1; float orderT = 0; bool dirty = true; std::vector<std::pair<int, int>> links; std::vector<float> linkFlow;
 };
 
 enum { B_A, B_B, B_X, B_Y, B_LB, B_RB, B_START, B_BACK, B_UP, B_DOWN, B_LEFT, B_RIGHT, NB };
@@ -96,12 +111,12 @@ struct Player {
     bool joined = false, cpu = false, view = false; int dev = -9; int team = 0, idx = 0; Col col;
     V2 cur, cam; float zoom = 1, shake = 0; int sel = 1, hover = -1; float yHold = 0, toastT = 0; std::string toast; bool bigMap = false; bool devLost = false;
     SDL_Rect vp = { 0, 0, 0, 0 };
-    float thinkT = 1, goalWait = 0; V2 goal; int goalType = -1, goalStruct = -1; bool hasGoal = false;
+    float thinkT = 1, goalWait = 0, exploreT = 20; V2 goal; int goalType = -1, goalStruct = -1; bool hasGoal = false;
 };
 
 enum { ST_TITLE, ST_HELP, ST_OPTIONS, ST_LOBBY, ST_MISSIONS, ST_GAME, ST_ICON, ST_LOGO };
-enum { MODE_COOP, MODE_ENDLESS, MODE_VERSUS };
-static const char* MODENAMES[3] = { "CO-OP MISSIONS", "CO-OP ENDLESS", "VERSUS" };
+enum { MODE_COOP, MODE_ENDLESS, MODE_VERSUS, MODE_RAID, MODE_N };
+static const char* MODENAMES[MODE_N] = { "CO-OP MISSIONS", "CO-OP ENDLESS", "VERSUS", "RAID" };
 static const char* RESNAMES[5] = { "AUTO", "1280 X 720", "1920 X 1080", "2560 X 1440", "3840 X 2160" };
 static const int RESH[5] = { 0, 720, 1080, 1440, 2160 };
 
@@ -115,7 +130,7 @@ struct Game {
     std::vector<Dev> devs; Player pl[4];
     // world
     Mission M; float WW = 3600, WH = 2400; float time = 0, waveT = 0, slow = 1; int waveN = 0, uidNext = 1, motherUid = -1; bool motherWarned = false, motherSpawned = false;
-    std::vector<Asteroid> ast; std::vector<Struct> st; std::vector<Enemy> en; std::vector<Bullet> bl; std::vector<Part> parts; std::vector<Beam> beams; std::vector<Warn> warns; std::vector<Ping> pings;
+    std::vector<Asteroid> ast; std::vector<Struct> st; std::vector<Enemy> en; std::vector<Bullet> bl; std::vector<Part> parts; std::vector<Beam> beams; std::vector<Warn> warns; std::vector<Ping> pings; std::vector<Fighter> fi; float seeT = 0; bool crystalOut = false;
     Team teams[4]; int nTeams = 1;
     bool paused = false; int pauseSel = 0; int pauser = -1;
     int result = 0; float resultT = 0; int winner = -1; int resultSel = 0; std::string resultMsg;
@@ -123,6 +138,12 @@ struct Game {
     // test switches
     int shotFrame = -1; std::string shotPath = "shot.bmp"; bool bots = false; int fast = 1; int frame = 0;
 } G;
+static bool rivals() { return G.mode == MODE_VERSUS || G.mode == MODE_RAID; } // everyone has their own base
+static bool raid() { return G.mode == MODE_RAID; }
+// raid escalation: fighter weapons get stronger as the game goes on (x2 at 10 minutes), so a raid always ends
+static float ftrPower() { return raid() ? 1 + G.time / 600.f : 1; }
+// Raid hides rival bases until you find them
+static bool seen(int viewerTeam, int team) { return !raid() || viewerTeam < 0 || team == viewerTeam || (G.teams[viewerTeam].found >> team & 1); }
 
 // ---------------------------------------------------------------- config
 static void saveCfg() {
@@ -208,7 +229,7 @@ static int addStruct(int t, int team, V2 p, float built) {
 
 static void genWorld() {
     G.ast.clear();
-    if (G.mode != MODE_VERSUS) {
+    if (!rivals()) {
         int n = 0; for (auto& q : G.pl) if (q.joined) n++;
         G.WW = 3400 + 500.f * (n - 1); G.WH = 2300 + 300.f * (n - 1);
         V2 hqp(G.WW / 2, G.WH / 2);
@@ -278,11 +299,14 @@ static void recomputeNet(int team) {
     }
     for (int i : ids) G.st[i].powered = G.st[i].connected && G.st[i].built >= 1;
 }
-static bool spend(Team& T, float e) { if (T.energy >= e) { T.energy -= e; T.drainAcc += e; return true; } return false; }
+static int SPENDER = -1; // structure being updated, so energy use can be shown on its links
+static bool spend(Team& T, float e) { if (T.energy >= e) { T.energy -= e; T.drainAcc += e; if (SPENDER >= 0) G.st[SPENDER].useAcc += e; return true; } return false; }
 
-static int astInRange(V2 p, float range) {
+// what this team can mine from an asteroid (crystal only after its research is done)
+static float astLeft(const Asteroid& a, int team) { return a.dead ? 0 : a.minerals + (team >= 0 && G.teams[team].crystal ? a.crystal : 0); }
+static int astInRange(V2 p, float range, int team) {
     int best = -1; float bd = 1e9;
-    for (int i = 0; i < (int)G.ast.size(); i++) { auto& a = G.ast[i]; if (a.dead || a.minerals <= 0) continue; float d = dist(a.p, p) - a.r; if (d <= range && d < bd) { bd = d; best = i; } }
+    for (int i = 0; i < (int)G.ast.size(); i++) { auto& a = G.ast[i]; if (astLeft(a, team) <= 0) continue; float d = dist(a.p, p) - a.r; if (d <= range && d < bd) { bd = d; best = i; } }
     return best;
 }
 static const char* canPlace(int team, int t, V2 q) {
@@ -293,7 +317,7 @@ static const char* canPlace(int team, int t, V2 q) {
     bool linked = false;
     for (auto& s : G.st) if (!s.dead && s.team == team && s.connected && dist(s.p, q) <= linkDist(t, s.t)) { linked = true; break; }
     if (!linked) return "OUT OF NETWORK RANGE";
-    if (t == S_MINER && astInRange(q, rangeOf(S_MINER, 1)) < 0) return "NO ASTEROID IN RANGE";
+    if (t == S_MINER && astInRange(q, rangeOf(S_MINER, 1), team) < 0) return "NO ASTEROID IN RANGE";
     if (T.minerals < SD[t].cost) return "NOT ENOUGH MINERALS";
     return nullptr;
 }

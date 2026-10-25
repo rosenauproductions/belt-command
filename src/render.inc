@@ -123,6 +123,29 @@ static void drawStruct(Canvas& cv, const View& v, const Struct& s, Col tc, float
         for (int i = 0; i < 3; i++) { float b = G.time * 1.2f + i * 2 * PI / 3; cv.arc(c, 21 * k, b, b + 1.2f, lw, withA(lc, 0.85f), gm); }
         break;
     }
+    case S_RESEARCH: {
+        // dish on a mast, scanning; turns crystal-coloured once the mineral is found
+        bool done = !ghost && G.teams[s.team].crystal; Col dc = done ? withA(C_CRY, alpha) : lc;
+        V2 b[4] = { P(-10, 8), P(10, 8), P(6, 14), P(-6, 14) }; cv.fillPoly(b, 4, fc); cv.poly(b, 4, lw, lc, gm);
+        cv.line(P(0, 8), P(0, -2), lw, lc, gm);
+        float a = ghost ? -PI / 2 : -PI / 2 + 0.6f * std::sin(s.spin);
+        V2 d0 = PR(-1, -14, a + PI / 2), d1 = PR(-1, 14, a + PI / 2); V2 cc = c + fromAng(a) * 2 * k + V2(0, -2) * k;
+        cv.arc(cc, 13 * k, a - 1.0f, a + 1.0f, lw * 1.2f, dc, gm); cv.line(cc, cc + fromAng(a) * 12 * k, lw * 0.8f, dc, gm); (void)d0; (void)d1;
+        if (!ghost && s.powered && !done) cv.arc(c, (s.r() + 4) * k, -PI / 2, -PI / 2 + 2 * PI * s.charge, lw, withA(C_CRY, 0.8f));
+        if (done) cv.glowDisc(cc + fromAng(a) * 12 * k, 5 * k, withA(C_CRY, 0.7f));
+        break;
+    }
+    case S_CARRIER: {
+        // long hull with a flight deck; lit bays show stored fighters
+        V2 h[8] = { P(-24, -7), P(-14, -12), P(16, -12), P(26, -4), P(26, 4), P(16, 12), P(-14, 12), P(-24, 7) };
+        cv.fillPoly(h, 8, fc); cv.poly(h, 8, lw, lc, gm);
+        cv.line(P(-18, 0), P(22, 0), lw * 0.7f, withA(lc, 0.5f), gm * 0.5f);
+        V2 br[4] = { P(-8, -12), P(2, -12), P(0, -18), P(-6, -18) }; cv.fillPoly(br, 4, fc); cv.poly(br, 4, lw * 0.9f, lc, gm);
+        int cap = carrierCap(s.lv), have = ghost ? cap : std::max(0, s.ast);
+        for (int i = 0; i < cap; i++) { float x = -15 + i * 30.f / std::max(1, cap - 1); Col bc = i < have ? withA(tc, alpha) : withA(C_DIM, 0.35f * alpha); cv.line(P(x - 2.5f, 5), P(x + 2.5f, 5), lw * 1.2f, bc, i < have ? 0.8f : 0); }
+        if (!ghost && s.powered && s.charge > 0 && have < cap) cv.arc(c + V2(20, 0) * k, 4 * k, -PI / 2, -PI / 2 + 2 * PI * s.charge, lw, withA(C_WHITE, 0.8f * alpha));
+        break;
+    }
     }
     if (ghost) return;
     if (s.lv > 1) for (int i = 0; i < s.lv; i++) { V2 q = P(-5.f * (s.lv - 1) + 10.f * i, s.r() + 7); cv.glowDisc(q, std::max(1.6f, 2.6f * k), withA(C_WHITE, 0.9f * alpha)); }
@@ -161,8 +184,18 @@ static void drawEnemy(Canvas& cv, const View& v, const Enemy& e) {
     }
 }
 
-static void drawAsteroid(Canvas& cv, const View& v, const Asteroid& a) {
-    float fr = a.maxMin > 0 ? a.minerals / a.maxMin : 0;
+static void drawFighter(Canvas& cv, const View& v, const Fighter& f) {
+    V2 c = v.w2s(f.p); float k = v.s * 1.4f, lw = std::max(1.0f, 1.5f * v.s);
+    Col col = f.flash > 0 ? C_WHITE : G.teams[f.team].col;
+    auto PR = [&](float x, float y) { return c + rotv(V2(x, y), f.ang) * k; };
+    V2 p[5] = { PR(9, 0), PR(-5, 6), PR(-2, 0), PR(-5, -6), PR(9, 0) };
+    cv.fillPoly(p, 4, Col(8, 12, 20, 235)); cv.poly(p, 4, lw, col, 0.9f);
+    cv.glowDisc(PR(-4, 0), 3.5f * k, withA(mixc(col, C_WHITE, 0.4f), 0.7f));
+    if (f.hp < f.maxhp - 0.5f) { float w = 16 * k, h = std::max(1.5f, 2 * k); V2 o = c - V2(w / 2, 13 * k); cv.rect(o.x, o.y, w, h, Col(0, 0, 0, 160)); cv.rect(o.x, o.y, w * f.hp / f.maxhp, h, withA(col, 0.9f)); }
+}
+
+static void drawAsteroid(Canvas& cv, const View& v, const Asteroid& a, bool showCry = false) {
+    float fr = a.maxMin > 0 ? std::min(1.f, (a.minerals + (showCry ? a.crystal : 0)) / a.maxMin) : 0;
     float r = a.r * (0.55f + 0.45f * fr);
     V2 c = v.w2s(a.p); int n = (int)a.shape.size();
     std::vector<V2> pts(n); for (int i = 0; i < n; i++) pts[i] = c + rotv(a.shape[i], a.rot) * r * v.s;
@@ -172,50 +205,64 @@ static void drawAsteroid(Canvas& cv, const View& v, const Asteroid& a) {
     int nf = (int)a.flecks.size(), lit = (int)std::ceil(fr * nf - 0.001f);
     for (int i = 0; i < nf; i++) {
         V2 q = c + rotv(a.flecks[i], a.rot) * r * v.s; float sz = std::max(1.2f, 2.6f * v.s);
-        if (i < lit) { cv.line(q - V2(sz, 0), q + V2(sz, 0), sz * 0.8f, withA(C_MIN, 0.9f), 0.9f); cv.line(q - V2(0, sz), q + V2(0, sz), sz * 0.8f, withA(C_MIN, 0.9f), 0); }
+        Col fc2 = showCry && a.minerals <= 0 ? C_CRY : C_MIN;
+        if (i < lit) { cv.line(q - V2(sz, 0), q + V2(sz, 0), sz * 0.8f, withA(fc2, 0.9f), 0.9f); cv.line(q - V2(0, sz), q + V2(0, sz), sz * 0.8f, withA(fc2, 0.9f), 0); }
         else cv.line(q - V2(sz * 0.6f, 0), q + V2(sz * 0.6f, 0), sz * 0.6f, withA(C_AST, 0.3f), 0);
     }
 }
 
+static bool fighterSeen(int vt, const Fighter& f) { return !raid() || vt < 0 || f.team == vt || inSight(vt, f.p); }
 static void drawWorld(Canvas& cv, const View& v, const Player* me) {
-    float k = v.s, lw = std::max(1.0f, 1.4f * k);
+    float k = v.s, lw = std::max(1.0f, 1.4f * k); int vt = me ? me->team : -1;
     // world border
     { V2 a = v.w2s(V2(0, 0)), b = v.w2s(V2(G.WW, G.WH)); Col bc = withA(Col(80, 110, 160), 0.45f); float ph = G.time * 20 * k;
       cv.dash(a, V2(b.x, a.y), 14 * k, 10 * k, lw, bc, ph); cv.dash(V2(b.x, a.y), b, 14 * k, 10 * k, lw, bc, ph); cv.dash(b, V2(a.x, b.y), 14 * k, 10 * k, lw, bc, ph); cv.dash(V2(a.x, b.y), a, 14 * k, 10 * k, lw, bc, ph); }
-    for (auto& a : G.ast) if (!a.dead && v.vis(a.p, a.r * 1.2f)) drawAsteroid(cv, v, a);
+    bool cryView = vt >= 0 ? G.teams[vt].crystal : G.teams[0].crystal;
+    for (auto& a : G.ast) if (!a.dead && v.vis(a.p, a.r * 1.2f)) drawAsteroid(cv, v, a, cryView);
     // shields
-    for (auto& s : G.st) if (!s.dead && s.t == S_SHIELD && s.powered && s.charge > 1) {
+    for (auto& s : G.st) if (!s.dead && s.t == S_SHIELD && s.powered && s.charge > 1 && seen(vt, s.team)) {
         float R0 = rangeOf(S_SHIELD, s.lv); if (!v.vis(s.p, R0)) continue; float fr = s.charge / (160 * lvm(s.lv));
         Col tc = G.teams[s.team].col; cv.circle(v.w2s(s.p), R0 * k, lw, withA(tc, 0.12f + 0.3f * fr), 0.8f);
         cv.glowDisc(v.w2s(s.p), R0 * k, withA(tc, 0.05f + 0.05f * fr));
     }
     // network links with energy pulses
     for (int t = 0; t < 4; t++) {
-        Team& T = G.teams[t]; if (!T.used) continue;
+        Team& T = G.teams[t]; if (!T.used || !seen(vt, t)) continue;
         for (size_t i = 0; i < T.links.size(); i++) {
             const Struct& a = G.st[T.links[i].first]; const Struct& b = G.st[T.links[i].second]; if (a.dead || b.dead) continue;
             if (!v.vis((a.p + b.p) * 0.5f, dist(a.p, b.p) * 0.5f + 20)) continue;
             V2 d = norm(b.p - a.p); V2 pa = v.w2s(a.p + d * (a.r() + 3)), pb = v.w2s(b.p - d * (b.r() + 3));
             bool live = a.powered && b.built >= 1 && T.alive;
-            cv.line(pa, pb, std::max(0.8f, 1.1f * k), withA(live ? T.col : C_DIM, live ? 0.42f : 0.25f), 0.5f);
+            // busier links glow brighter, thicker and pulse faster
+            float fl = i < T.linkFlow.size() ? T.linkFlow[i] : 0, f = live ? fl / (fl + 14) : 0;
+            Col lcol = live ? mixc(T.col, C_WHITE, 0.35f * f) : C_DIM;
+            if (live && f > 0.05f) cv.line(pa, pb, std::max(1.f, (2.5f + 6 * f) * k), withA(T.col, 0.06f + 0.16f * f), 0.3f + 1.2f * f);
+            cv.line(pa, pb, std::max(0.8f, (1.0f + 1.6f * f) * k), withA(lcol, live ? 0.38f + 0.5f * f : 0.25f), 0.4f + 1.3f * f);
             if (b.built < 1 && a.powered) { float ph = std::fmod(G.time * 1.8f, 1.f); cv.glowDisc(pa + (pb - pa) * ph, 4 * k, withA(T.col, 0.8f)); }
             else if (live && T.eprod > 0) {
-                float L = dist(a.p, b.p); float ph = std::fmod(G.time * 160 / std::max(L, 40.f) + (hash3(T.links[i].second, 0, 1) & 255) / 255.f, 1.f);
-                cv.glowDisc(pa + (pb - pa) * ph, 3.6f * k, withA(mixc(T.col, C_WHITE, 0.4f), T.energy > 2 ? 0.85f : 0.3f));
+                float L = dist(a.p, b.p); int np = 1 + (int)(f * 3);
+                for (int q = 0; q < np; q++) {
+                    float ph = std::fmod(G.time * (90 + 260 * f) / std::max(L, 40.f) + (hash3(T.links[i].second, 0, 1) & 255) / 255.f + q / (float)np, 1.f);
+                    cv.glowDisc(pa + (pb - pa) * ph, (3.0f + 3.5f * f) * k, withA(mixc(T.col, C_WHITE, 0.4f), T.energy > 2 ? 0.55f + 0.4f * f : 0.3f));
+                }
             }
         }
     }
     // mining beams
-    for (auto& s : G.st) if (!s.dead && s.t == S_MINER && s.mining && s.ast >= 0) {
+    for (auto& s : G.st) if (!s.dead && s.t == S_MINER && s.mining && s.ast >= 0 && seen(vt, s.team)) {
         const Asteroid& a = G.ast[s.ast]; if (!v.vis((s.p + a.p) * 0.5f, dist(s.p, a.p))) continue;
         V2 d = norm(a.p - s.p); V2 p0 = s.p + d * 16, p1 = a.p - d * a.r * 0.6f; V2 n = perp(d); V2 prev = v.w2s(p0);
-        for (int i = 1; i <= 6; i++) { float t = i / 6.f; V2 q = p0 + (p1 - p0) * t + n * std::sin(G.time * 20 + t * 9 + s.p.x) * 3 * (1 - std::fabs(t - 0.5f) * 2); V2 qs = v.w2s(q); cv.line(prev, qs, std::max(0.8f, 1.2f * k), withA(C_MIN, 0.75f), 0.8f); prev = qs; }
+        Col bc = s.cryBeam ? C_CRY : C_MIN; float fl = 0.75f + 0.25f * std::sin(G.time * 13 + s.p.y);
+        cv.line(v.w2s(p0), v.w2s(p1), std::max(2.f, 7 * k), withA(bc, 0.13f * fl), 1.6f); // soft halo
+        for (int i = 1; i <= 6; i++) { float t = i / 6.f; V2 q = p0 + (p1 - p0) * t + n * std::sin(G.time * 20 + t * 9 + s.p.x) * 3 * (1 - std::fabs(t - 0.5f) * 2); V2 qs = v.w2s(q); cv.line(prev, qs, std::max(0.8f, 1.5f * k), withA(mixc(bc, C_WHITE, 0.25f), 0.9f), 1.5f); prev = qs; }
+        cv.glowDisc(v.w2s(p1), 9 * k * fl, withA(bc, 0.75f)); cv.glowDisc(v.w2s(p0), 5 * k, withA(bc, 0.5f));
     }
     // range rings for the hovered structure and the selected build
     if (me) {
         if (me->hover >= 0) { const Struct& s = G.st[me->hover]; float rg = rangeOf(s.t, s.lv); if (rg > 0) cv.circle(v.w2s(s.p), rg * k, lw, withA(G.teams[s.team].col, 0.35f), 0.4f); }
     }
-    for (auto& s : G.st) if (!s.dead && v.vis(s.p, s.r() + 10)) drawStruct(cv, v, s, G.teams[s.team].col, 1, false);
+    for (auto& f : G.fi) if (!f.dead && v.vis(f.p, 14) && fighterSeen(vt, f)) drawFighter(cv, v, f);
+    for (auto& s : G.st) if (!s.dead && v.vis(s.p, s.r() + 10) && seen(vt, s.team)) drawStruct(cv, v, s, G.teams[s.team].col, 1, false);
     for (auto& b : G.beams) { float fr = b.life / b.max; V2 pa = v.w2s(b.a), pb = v.w2s(b.b); cv.line(pa, pb, b.w * k * (0.5f + fr), withA(b.c, fr), 1.2f); cv.line(pa, pb, std::max(0.8f, b.w * k * 0.4f), withA(C_WHITE, fr * 0.8f), 0); }
     for (auto& e : G.en) if (!e.dead && v.vis(e.p, ED[e.t].r + 10)) drawEnemy(cv, v, e);
     for (auto& b : G.bl) {
@@ -257,7 +304,7 @@ static void drawCursorAndGhost(Canvas& cv, const View& v, const Player& p, bool 
         Col gc = why ? (ok ? Col(255, 200, 90) : C_BAD) : G.teams[p.team].col;
         for (auto& s : G.st) if (!s.dead && s.team == p.team && s.connected && dist(s.p, p.cur) <= linkDist(t, s.t)) cv.dash(c, v.w2s(s.p), 6 * k, 5 * k, std::max(0.8f, 1.1f * k), withA(gc, 0.5f), G.time * 30 * k);
         float rg = rangeOf(t, 1); if (rg > 0) cv.circle(c, rg * k, std::max(0.8f, 1.2f * k), withA(gc, 0.35f), 0.4f);
-        if (t == S_MINER) { int a = astInRange(p.cur, rg); if (a >= 0) cv.dash(c, v.w2s(G.ast[a].p), 5 * k, 4 * k, std::max(0.8f, 1.2f * k), withA(C_MIN, 0.7f), G.time * 30); }
+        if (t == S_MINER) { int a = astInRange(p.cur, rg, p.team); if (a >= 0) cv.dash(c, v.w2s(G.ast[a].p), 5 * k, 4 * k, std::max(0.8f, 1.2f * k), withA(C_MIN, 0.7f), G.time * 30); }
         Struct g; g.t = t; g.p = p.cur; g.team = p.team; g.built = 1; g.powered = true; g.aim = -PI / 2; g.maxhp = g.hp = 1;
         drawStruct(cv, v, g, gc, 0.55f, true);
     }
@@ -272,13 +319,16 @@ static void drawCursorAndGhost(Canvas& cv, const View& v, const Player& p, bool 
 }
 
 static void drawMinimap(Canvas& cv, float x, float y, float w, const Player* me, float u) {
+    int vt = me ? me->team : -1;
     float h = w * G.WH / G.WW, s = w / G.WW;
     cv.rect(x, y, w, h, Col(6, 9, 16, 210)); cv.rectLine(x, y, w, h, std::max(1.f, 1.2f * u), withA(Col(90, 120, 170), 0.7f), 0.3f);
     auto M = [&](V2 p) { return V2(x + clampf(p.x, 0, G.WW) * s, y + clampf(p.y, 0, G.WH) * s); };
     float d = std::max(1.5f, 2.2f * u);
-    for (auto& a : G.ast) if (!a.dead) { V2 q = M(a.p); float rr = std::max(1.2f, a.r * s); cv.rect(q.x - rr / 2, q.y - rr / 2, rr, rr, a.minerals > 0 ? withA(C_MIN, 0.55f) : withA(C_AST, 0.4f)); }
-    for (int t = 0; t < 4; t++) { Team& T = G.teams[t]; if (!T.used) continue; for (auto& l : T.links) { const Struct& a = G.st[l.first]; const Struct& b = G.st[l.second]; if (!a.dead && !b.dead) cv.line(M(a.p), M(b.p), std::max(0.8f, u * 0.8f), withA(T.col, 0.35f), 0); } }
-    for (auto& st : G.st) if (!st.dead) { V2 q = M(st.p); float sz = st.t == S_HQ ? d * 2.2f : d; cv.rect(q.x - sz / 2, q.y - sz / 2, sz, sz, withA(G.teams[st.team].col, st.powered ? 1 : 0.4f)); }
+    bool cry = vt >= 0 && G.teams[vt].crystal;
+    for (auto& a : G.ast) if (!a.dead) { V2 q = M(a.p); float rr = std::max(1.2f, a.r * s); cv.rect(q.x - rr / 2, q.y - rr / 2, rr, rr, a.minerals > 0 ? withA(C_MIN, 0.55f) : cry && a.crystal > 0 ? withA(C_CRY, 0.55f) : withA(C_AST, 0.4f)); }
+    for (int t = 0; t < 4; t++) { Team& T = G.teams[t]; if (!T.used || !seen(vt, t)) continue; for (auto& l : T.links) { const Struct& a = G.st[l.first]; const Struct& b = G.st[l.second]; if (!a.dead && !b.dead) cv.line(M(a.p), M(b.p), std::max(0.8f, u * 0.8f), withA(T.col, 0.35f), 0); } }
+    for (auto& f : G.fi) if (!f.dead && fighterSeen(vt, f)) { V2 q = M(f.p); cv.rect(q.x - d * 0.4f, q.y - d * 0.4f, d * 0.8f, d * 0.8f, withA(mixc(G.teams[f.team].col, C_WHITE, 0.3f), 0.9f)); }
+    for (auto& st : G.st) if (!st.dead && seen(vt, st.team)) { V2 q = M(st.p); float sz = st.t == S_HQ ? d * 2.2f : d; cv.rect(q.x - sz / 2, q.y - sz / 2, sz, sz, withA(G.teams[st.team].col, st.powered ? 1 : 0.4f)); }
     for (auto& e : G.en) if (!e.dead) { V2 q = M(e.p); float sz = e.t == E_MOTHER ? d * 3 : d; cv.rect(q.x - sz / 2, q.y - sz / 2, sz, sz, C_ALIEN); }
     float bl = 0.5f + 0.5f * std::sin(G.time * 10);
     for (auto& wn : G.warns) { V2 q = M(wn.p); cv.circle(q, 5 * u, std::max(1.f, u), withA(C_ALIEN, bl), 0.5f, 10); }
@@ -308,11 +358,21 @@ static void drawObjective(Canvas& cv, const Player& p, float u, float leftEdge, 
     case OBJ_SURVIVE: line = "SURVIVE " + mmss(std::max(0.f, G.M.target - G.time)); prog = G.time / G.M.target; break;
     case OBJ_MOTHER: if (!G.motherSpawned) line = "MOTHERSHIP IN " + mmss(std::max(0.f, G.M.target - G.time)); else { line = "DESTROY THE MOTHERSHIP"; Enemy* m = enemyByUid(G.motherUid); if (m) prog = 1 - m->hp / m->maxhp; } break;
     case OBJ_ENDLESS: line = "TIME " + mmss(G.time) + "   WAVE " + std::to_string(G.waveN); break;
+    case OBJ_RAID: { int alive = 0, found = 0; for (int t = 0; t < G.nTeams; t++) if (G.teams[t].alive && t != p.team) { alive++; if (T.found >> t & 1) found++; }
+        line = "RIVALS " + std::to_string(alive) + "   FOUND " + std::to_string(found) + " / " + std::to_string(alive); break; }
     case OBJ_VERSUS: { int alive = 0; for (int t = 0; t < G.nTeams; t++) if (G.teams[t].alive && t != p.team) alive++; line = "RIVALS " + std::to_string(alive) + "   MINED " + std::to_string((int)T.mined) + " / " + std::to_string((int)G.M.target); prog = T.mined / G.M.target; break; }
     }
     float fs = std::min(20 * u, room / std::max(1.f, (float)line.size()));
     FONT.draw(cv, line.c_str(), V2(cx, y), fs, C_WHITE, 1);
     if (prog >= 0) { float w = std::min(260 * u, room * 0.9f); cv.rect(cx - w / 2, y + 28 * u, w, 4 * u, Col(255, 255, 255, 40)); cv.rect(cx - w / 2, y + 28 * u, w * clampf(prog, 0, 1), 4 * u, withA(T.col, 0.9f)); }
+    if (raid()) {
+        int nf = 0; for (auto& f : G.fi) if (!f.dead && f.team == p.team) nf++;
+        char pw[16]; snprintf(pw, sizeof pw, "%.1f", ftrPower());
+        std::string fl = "FIGHTERS " + std::to_string(nf) + "   POWER X" + pw + "   TIME " + mmss(G.time);
+        if (T.order >= 0) fl += "   ATTACK ORDER";
+        FONT.draw(cv, fl.c_str(), V2(cx, y + 40 * u), 13 * u, withA(T.order >= 0 ? T.col : C_DIM, 0.9f), 1);
+        return;
+    }
     std::string wl = G.waveT < 6 || G.alertT > 0 ? "WAVE INCOMING" : "NEXT WAVE " + mmss(G.waveT);
     Col wc = G.waveT < 6 || G.alertT > 0 ? withA(C_ALIEN, 0.6f + 0.4f * std::sin(G.time * 10)) : withA(C_DIM, 0.9f);
     FONT.draw(cv, wl.c_str(), V2(cx, y + 40 * u), 13 * u, wc, 1);
@@ -354,12 +414,14 @@ static void drawHud(Canvas& cv, Player& p) {
     int shown = 0;
     for (auto& w : G.warns) edgeArrow(w.p, withA(C_ALIEN, 0.6f + 0.4f * std::sin(G.time * 10)), 16 * u);
     for (auto& e : G.en) if (!e.dead && shown < 24 && dist(e.p, p.cam) < 1600) { edgeArrow(e.p, C_ALIEN, (e.t == E_MOTHER ? 16 : 9) * u); shown++; }
+    shown = 0;
+    for (auto& f : G.fi) if (!f.dead && f.team != p.team && shown < 16 && dist(f.p, p.cam) < 1600 && fighterSeen(p.team, f)) { edgeArrow(f.p, G.teams[f.team].col, 8 * u); shown++; }
     for (auto& pg : G.pings) if (G.pl[pg.player].team == p.team && pg.player != p.idx) edgeArrow(pg.p, G.pl[pg.player].col, 12 * u);
     // build bar
-    float slot = 66 * u, gap = 7 * u; float total = 8 * slot + 7 * gap;
+    float slot = 66 * u, gap = 7 * u; float total = NBUILD * slot + (NBUILD - 1) * gap;
     if (total > vp.w * 0.94f) { float sc = vp.w * 0.94f / total; slot *= sc; gap *= sc; total = vp.w * 0.94f; }
     float sx = vp.x + (vp.w - total) / 2, sy = vp.y + vp.h - slot - 34 * u;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < NBUILD; i++) {
         int t = BUILDS[i]; float ox = sx + i * (slot + gap); bool sel = i == p.sel; bool afford = T.minerals >= SD[t].cost;
         cv.rect(ox, sy, slot, slot, sel ? Col(20, 30, 45, 230) : Col(6, 9, 15, 200));
         cv.rectLine(ox, sy, slot, slot, (sel ? 2.2f : 1.0f) * u, sel ? p.col : withA(C_DIM, 0.5f), sel ? 1 : 0);
@@ -368,7 +430,7 @@ static void drawHud(Canvas& cv, Player& p) {
         drawStruct(cv, iv, g, afford ? (sel ? p.col : T.col) : C_DIM, afford ? 1 : 0.55f, true);
         snprintf(buf, sizeof buf, "%d", SD[t].cost);
         FONT.draw(cv, buf, V2(ox + slot / 2, sy + slot - 15 * u * slot / (66 * u)), 11 * u * slot / (66 * u), afford ? C_MIN : C_BAD, 1, 0, 0.3f);
-        snprintf(buf, sizeof buf, "%d", i + 1);
+        snprintf(buf, sizeof buf, "%d", (i + 1) % 10);
         if (p.dev == -1) FONT.draw(cv, buf, V2(ox + 4 * u, sy + 4 * u), 9 * u, withA(C_DIM, 0.8f), 0, 0, 0);
     }
     int t = BUILDS[p.sel];
@@ -376,7 +438,7 @@ static void drawHud(Canvas& cv, Player& p) {
     FONT.draw(cv, buf, V2(vp.x + vp.w * 0.5f, sy - 22 * u), 14 * u, withA(C_WHITE, 0.9f), 1);
     char hint[200];
     if (p.dev == -9) snprintf(hint, sizeof hint, "CPU");
-    else snprintf(hint, sizeof hint, "%s/%s SELECT   %s BUILD   %s UPGRADE   HOLD %s RECYCLE   %s PING   %s MAP", btnLab(p.dev, B_LB), btnLab(p.dev, B_RB), btnLab(p.dev, B_A), btnLab(p.dev, B_X), btnLab(p.dev, B_Y), btnLab(p.dev, B_B), btnLab(p.dev, B_BACK));
+    else snprintf(hint, sizeof hint, raid() ? "%s/%s SELECT   %s BUILD   %s UPGRADE   HOLD %s RECYCLE   %s PING / ATTACK   %s MAP" : "%s/%s SELECT   %s BUILD   %s UPGRADE   HOLD %s RECYCLE   %s PING   %s MAP", btnLab(p.dev, B_LB), btnLab(p.dev, B_RB), btnLab(p.dev, B_A), btnLab(p.dev, B_X), btnLab(p.dev, B_Y), btnLab(p.dev, B_B), btnLab(p.dev, B_BACK));
     float hs = std::min(11 * u, vp.w * 0.95f / std::max(1.f, (float)strlen(hint)));
     FONT.draw(cv, hint, V2(vp.x + vp.w * 0.5f, vp.y + vp.h - 20 * u), hs, withA(C_DIM, 0.95f), 1, 0, 0);
     // hover info
@@ -386,7 +448,9 @@ static void drawHud(Canvas& cv, Player& p) {
         cv.rect(px, py, pw, ph, Col(5, 8, 14, 215)); cv.rectLine(px, py, pw, ph, 1.2f * u, withA(G.teams[s.team].col, 0.7f), 0.3f);
         snprintf(buf, sizeof buf, "%s  LV %d", SD[s.t].name, s.lv); FONT.draw(cv, buf, V2(px + 12 * u, py + 10 * u), 17 * u, G.teams[s.team].col);
         snprintf(buf, sizeof buf, "HP %d/%d", (int)s.hp, (int)s.maxhp); FONT.draw(cv, buf, V2(px + 12 * u, py + 36 * u), 12 * u, C_WHITE);
+        if (s.t == S_CARRIER && s.built >= 1) { int fl = 0; for (auto& f : G.fi) if (f.home == p.hover) fl++; snprintf(buf, sizeof buf, "FIGHTERS %d/%d", fl, carrierCap(s.lv)); FONT.draw(cv, buf, V2(px + pw * 0.5f, py + 36 * u), 12 * u, withA(C_WHITE, 0.85f), 1); }
         const char* stt = s.built < 1 ? (s.connected ? "BUILDING" : "NOT CONNECTED") : !s.powered ? "NO POWER" : s.t == S_MINER ? (s.mining ? "MINING" : (s.ast < 0 ? "NO ASTEROID" : "LOW ENERGY")) : s.t == S_SHIELD ? "SHIELD UP" : "ONLINE";
+        if (s.t == S_RESEARCH && s.built >= 1) { if (G.teams[s.team].crystal) stt = "CRYSTAL FOUND"; else if (s.powered) { snprintf(buf, sizeof buf, "RESEARCH %d%%", (int)(100 * s.charge)); stt = buf; } }
         if (s.t == S_SHIELD && s.powered) { snprintf(buf, sizeof buf, "SHIELD %d%%", (int)(100 * s.charge / (160 * lvm(s.lv)))); stt = buf; }
         FONT.draw(cv, stt, V2(px + pw - 12 * u, py + 36 * u), 12 * u, !s.powered && s.built >= 1 ? C_BAD : C_GOOD, 2);
         if (own) {
@@ -394,10 +458,11 @@ static void drawHud(Canvas& cv, Player& p) {
             if (s.lv < 3 && s.built >= 1) snprintf(l1, sizeof l1, "%s UPGRADE  %d", btnLab(p.dev, B_X), upgCost(s.t, s.lv)); else snprintf(l1, sizeof l1, s.lv >= 3 ? "MAX LEVEL" : "UPGRADE AFTER BUILD");
             FONT.draw(cv, l1, V2(px + 12 * u, py + 60 * u), 12 * u, s.lv < 3 && s.built >= 1 && T.minerals >= upgCost(s.t, s.lv) ? C_MIN : C_DIM);
             if (s.t != S_HQ) { snprintf(l2, sizeof l2, "HOLD %s RECYCLE  +%d", btnLab(p.dev, B_Y), (int)recycleValue(s)); FONT.draw(cv, l2, V2(px + 12 * u, py + 84 * u), 12 * u, withA(C_WHITE, 0.7f)); }
-        } else FONT.draw(cv, "RIVAL STRUCTURE", V2(px + 12 * u, py + 60 * u), 12 * u, C_BAD);
+        } else { FONT.draw(cv, "RIVAL STRUCTURE", V2(px + 12 * u, py + 60 * u), 12 * u, C_BAD);
+            if (raid()) { snprintf(buf, sizeof buf, "%s SEND FIGHTERS HERE", btnLab(p.dev, B_B)); FONT.draw(cv, buf, V2(px + 12 * u, py + 84 * u), 12 * u, withA(C_WHITE, 0.7f)); } }
     }
     if (p.toastT > 0) FONT.draw(cv, p.toast.c_str(), V2(vp.x + vp.w * 0.5f, sy - 52 * u), 18 * u, withA(Col(255, 210, 120), std::min(1.f, p.toastT * 2)), 1);
-    if (!T.alive && G.mode == MODE_VERSUS) FONT.draw(cv, "COMMAND LOST", V2(vp.x + vp.w * 0.5f, vp.y + vp.h * 0.4f), 46 * u, withA(C_BAD, 0.9f), 1);
+    if (!T.alive && rivals()) FONT.draw(cv, "COMMAND LOST", V2(vp.x + vp.w * 0.5f, vp.y + vp.h * 0.4f), 46 * u, withA(C_BAD, 0.9f), 1);
     if (p.devLost) FONT.draw(cv, "CONTROLLER DISCONNECTED", V2(vp.x + vp.w * 0.5f, vp.y + vp.h * 0.5f), 26 * u, C_BAD, 1);
 }
 
@@ -418,7 +483,7 @@ static void renderGame(Canvas& cv) {
         SDL_RenderSetClipRect(G.ren, &q);
         float u = hudU(q); float mw = q.w * 0.86f; float mh = mw * G.WH / G.WW; if (mh > q.h * 0.72f) { mh = q.h * 0.72f; mw = mh * G.WW / G.WH; }
         cv.rect((float)q.x, (float)q.y, (float)q.w, (float)q.h, Col(3, 5, 10, 255));
-        drawMinimap(cv, q.x + (q.w - mw) / 2, q.y + (q.h - mh) / 2 + 14 * u, mw, nullptr, u * 1.3f);
+        drawMinimap(cv, q.x + (q.w - mw) / 2, q.y + (q.h - mh) / 2 + 14 * u, mw, raid() ? views[0] : nullptr, u * 1.3f);
         FONT.draw(cv, G.M.name, V2(q.x + q.w * 0.5f, q.y + 18 * u), 24 * u, C_WHITE, 1);
         cv.flush(G.ren);
     }

@@ -119,18 +119,23 @@ static void updatePlayer(Player& p, float dt) {
     float hx = p.vp.w * 0.5f / vs, hy = p.vp.h * 0.5f / vs, bx = hx * 0.55f, by = hy * 0.5f;
     if (p.cur.x > p.cam.x + bx) p.cam.x = p.cur.x - bx; if (p.cur.x < p.cam.x - bx) p.cam.x = p.cur.x + bx;
     if (p.cur.y > p.cam.y + by) p.cam.y = p.cur.y - by; if (p.cur.y < p.cam.y - by) p.cam.y = p.cur.y + by;
-    p.hover = hoverAt(p.team, p.cur, G.mode == MODE_VERSUS);
+    p.hover = hoverAt(p.team, p.cur, rivals());
+    if (p.hover >= 0 && !seen(p.team, G.st[p.hover].team)) p.hover = -1;
     p.bigMap = d->b[B_BACK];
     if (!T.alive) return;
-    if (pr(*d, B_LB)) { p.sel = (p.sel + 7) % 8; AU.play(SND_UI, 0.5f); }
-    if (pr(*d, B_RB)) { p.sel = (p.sel + 1) % 8; AU.play(SND_UI, 0.5f); }
-    if (d->id == -1) { const Uint8* k = SDL_GetKeyboardState(nullptr); for (int i = 0; i < 8; i++) if (k[SDL_SCANCODE_1 + i] && p.sel != i) { p.sel = i; AU.play(SND_UI, 0.5f); } }
+    if (pr(*d, B_LB)) { p.sel = (p.sel + NBUILD - 1) % NBUILD; AU.play(SND_UI, 0.5f); }
+    if (pr(*d, B_RB)) { p.sel = (p.sel + 1) % NBUILD; AU.play(SND_UI, 0.5f); }
+    if (d->id == -1) { const Uint8* k = SDL_GetKeyboardState(nullptr); for (int i = 0; i < NBUILD; i++) if (k[i == 9 ? SDL_SCANCODE_0 : SDL_SCANCODE_1 + i] && p.sel != i) { p.sel = i; AU.play(SND_UI, 0.5f); } }
     bool own = p.hover >= 0 && G.st[p.hover].team == p.team;
     if (pr(*d, B_A)) { if (own) toast(p, "SPACE TAKEN - MOVE OFF THE STRUCTURE"), AU.play(SND_ERR, 0.4f); else tryBuild(p, BUILDS[p.sel], p.cur, false); }
     if (pr(*d, B_X)) { if (own) tryUpgrade(p, p.hover, false); else { toast(p, "POINT AT A STRUCTURE TO UPGRADE"); AU.play(SND_ERR, 0.4f); } }
     if (d->b[B_Y] && own && G.st[p.hover].t != S_HQ) { p.yHold += dt; if (p.yHold >= 0.6f) { recycle(p, p.hover); p.yHold = -10; } }
     else if (!d->b[B_Y]) p.yHold = 0; else p.yHold = std::min(p.yHold, 0.f);
-    if (pr(*d, B_B)) { G.pings.push_back({ p.cur, 3.0f, p.idx }); AU.play(SND_PING, 0.5f); }
+    if (pr(*d, B_B)) {
+        G.pings.push_back({ p.cur, 3.0f, p.idx }); AU.play(SND_PING, 0.5f);
+        // raid: ping a rival structure to send every fighter at it
+        if (raid() && p.hover >= 0 && G.st[p.hover].team != p.team) { T.order = p.hover; T.orderT = 45; for (auto& f : G.fi) if (f.team == p.team) f.retarget = 0; toast(p, "FIGHTERS ATTACKING"); }
+    }
 }
 
 // ---------------------------------------------------------------- menus
@@ -208,13 +213,13 @@ static void updateMenus(float dt) {
                 if (pr(d, B_B)) { G.pl[pi].joined = false; AU.play(SND_UI, 0.6f); }
                 if (pr(d, B_X) && joinedCount() < 4) joinPlayer(-9, true);
                 if (pr(d, B_Y)) { for (int i = 3; i >= 0; i--) if (G.pl[i].joined && G.pl[i].cpu) { G.pl[i].joined = false; AU.play(SND_UI, 0.6f); break; } }
-                if (d.navX) { G.mode = (G.mode + d.navX + 3) % 3; AU.play(SND_UI, 0.6f); }
+                if (d.navX) { G.mode = (G.mode + d.navX + MODE_N) % MODE_N; AU.play(SND_UI, 0.6f); }
                 if (pr(d, B_START)) startNow = true;
             } else if (pr(d, B_B) && joinedCount() == 0) { G.state = ST_TITLE; G.menuSel = 0; AU.play(SND_UI, 0.6f); }
         }
         bool anyHuman = false; for (auto& p : G.pl) if (p.joined && !p.cpu) anyHuman = true;
         if (startNow && anyHuman) {
-            if (G.mode == MODE_VERSUS && joinedCount() < 2) joinPlayer(-9, true);
+            if (rivals() && joinedCount() < 2) joinPlayer(-9, true);
             AU.play(SND_UI_OK, 0.8f);
             if (G.mode == MODE_COOP) { G.state = ST_MISSIONS; G.menuSel = 0; for (int i = 0; i < NMISSIONS; i++) if (!(G.opt.done & (1u << i))) { G.menuSel = i; break; } G.stateT = 0; }
             else startGame();
@@ -253,15 +258,18 @@ static void renderMenus(Canvas& cv) {
             "LASERS BURN ENERGY. MISSILES BURN MINERALS. PLAN FOR BOTH.",
             "ALIENS ATTACK IN WAVES FROM THE EDGE. RED MARKERS WARN YOU.",
             "IF A LINK BREAKS, EVERYTHING PAST IT GOES DARK.",
+            "CARRIERS BUILD FIGHTERS. THEY GUARD YOUR BASE AND RAID RIVALS.",
+            "RESEARCH FINDS CRYSTAL: EVERY ASTEROID REFILLS AND IT IS WORTH 1.5X.",
+            "RAID: NO ALIENS. RIVAL BASES STAY HIDDEN UNTIL YOU GET CLOSE.",
             "",
             "STICK - MOVE CURSOR      LB / RB - CHOOSE STRUCTURE",
             "A - BUILD     X - UPGRADE     HOLD Y - RECYCLE     B - PING",
             "TRIGGERS OR RIGHT STICK - ZOOM     BACK - BIG MAP     START - PAUSE",
-            "KEYBOARD: WASD, SPACE, U, R, Q/E, 1-8, MOUSE, ESC",
+            "KEYBOARD: WASD, SPACE, U, R, Q/E, 1-0, MOUSE, ESC",
         };
         int n = sizeof(lines) / sizeof(lines[0]);
         drawPanel(cv, cx - 760 * u, 140 * u, 1520 * u, (n * 46 + 40) * u, withA(PCOL[0], 0.5f), u);
-        for (int i = 0; i < n; i++) FONT.draw(cv, lines[i], V2(cx, 170 * u + i * 46 * u), 20 * u, i >= 10 ? withA(C_MIN, 0.95f) : withA(C_WHITE, 0.9f), 1);
+        for (int i = 0; i < n; i++) FONT.draw(cv, lines[i], V2(cx, 170 * u + i * 46 * u), 20 * u, i >= 13 ? withA(C_MIN, 0.95f) : withA(C_WHITE, 0.9f), 1);
         FONT.draw(cv, "PRESS A TO GO BACK", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.9f), 1);
         break;
     }
@@ -306,7 +314,7 @@ static void renderMenus(Canvas& cv) {
         float my = y0 + ph + 70 * u;
         char ml[64]; snprintf(ml, sizeof ml, "<  %s  >", MODENAMES[G.mode]);
         FONT.draw(cv, ml, V2(cx, my), 34 * u, PCOL[0], 1, 0, 1.0f);
-        const char* md = G.mode == MODE_COOP ? "SHARE ONE BASE AND ONE STOCKPILE. PLAY THE MISSIONS." : G.mode == MODE_ENDLESS ? "SHARE ONE BASE. THE WAVES NEVER STOP." : "EVERYONE BUILDS THEIR OWN BASE. TURRETS FIRE ON RIVALS TOO.";
+        const char* md = G.mode == MODE_COOP ? "SHARE ONE BASE AND ONE STOCKPILE. PLAY THE MISSIONS." : G.mode == MODE_ENDLESS ? "SHARE ONE BASE. THE WAVES NEVER STOP." : G.mode == MODE_VERSUS ? "EVERYONE BUILDS THEIR OWN BASE. TURRETS FIRE ON RIVALS TOO." : "NO ALIENS. YOUR FRIENDS ARE THE RIVALS. FIND THEIR BASES AND SEND CARRIER FIGHTERS.";
         FONT.draw(cv, md, V2(cx, my + 56 * u), 18 * u, withA(C_WHITE, 0.85f), 1);
         if (G.mode == MODE_ENDLESS && G.opt.bestEndless > 0) FONT.draw(cv, ("BEST " + mmss((float)G.opt.bestEndless)).c_str(), V2(cx, my + 90 * u), 16 * u, C_MIN, 1);
         FONT.draw(cv, "A JOIN    B LEAVE    LEFT/RIGHT MODE    X ADD CPU    Y REMOVE CPU    START BEGIN", V2(cx, G.H - 70 * u), 16 * u, withA(C_DIM, 0.95f), 1);
@@ -366,7 +374,7 @@ static void renderOverlay(Canvas& cv) {
         float a = clampf((G.resultT - 0.8f) * 2, 0, 1);
         cv.rect(0, 0, (float)G.W, (float)G.H, Col(0, 0, 0, (int)(170 * a)));
         std::string title; Col tc = PCOL[0];
-        if (G.mode == MODE_VERSUS) { if (G.winner >= 0) { for (auto& p : G.pl) if (p.joined && p.team == G.winner) { title = std::string(p.cpu ? "CPU " : "") + "P" + std::to_string(p.idx + 1) + " WINS"; tc = p.col; } } else title = "DRAW"; }
+        if (rivals()) { if (G.winner >= 0) { for (auto& p : G.pl) if (p.joined && p.team == G.winner) { title = std::string(p.cpu ? "CPU " : "") + "P" + std::to_string(p.idx + 1) + " WINS"; tc = p.col; } } else title = "DRAW"; }
         else title = G.result == 1 ? "MISSION COMPLETE" : (G.mode == MODE_ENDLESS ? "THE BELT IS LOST" : "MISSION FAILED");
         if (G.result == 2) tc = C_BAD;
         FONT.draw(cv, title.c_str(), V2(cx, G.H * 0.2f), 64 * u, withA(tc, a), 1, 0, 1.2f);
@@ -374,7 +382,7 @@ static void renderOverlay(Canvas& cv) {
         float y = G.H * 0.42f;
         for (int t = 0; t < G.nTeams; t++) {
             Team& T = G.teams[t]; char b[160];
-            snprintf(b, sizeof b, "%s   MINED %d   KILLS %d   BUILT %d   TIME %s", G.mode == MODE_VERSUS ? ("TEAM " + std::to_string(t + 1)).c_str() : "", (int)T.mined, T.kills, T.built, mmss(G.time).c_str());
+            snprintf(b, sizeof b, "%s   MINED %d   KILLS %d   BUILT %d   FIGHTERS LOST %d   TIME %s", rivals() ? ("TEAM " + std::to_string(t + 1)).c_str() : "", (int)T.mined, T.kills, T.built, T.ftrLost, mmss(G.time).c_str());
             FONT.draw(cv, b, V2(cx, y + t * 40 * u), 20 * u, withA(T.col, a), 1);
         }
         if (G.resultT > 1.6f) {
@@ -449,7 +457,7 @@ static void testSetup() {
     std::string s = st;
     int n = getenv("BC_PLAYERS") ? atoi(getenv("BC_PLAYERS")) : 1;
     int cpus = getenv("BC_CPUS") ? atoi(getenv("BC_CPUS")) : 0;
-    if (getenv("BC_MODE")) { std::string m = getenv("BC_MODE"); G.mode = m == "versus" ? MODE_VERSUS : m == "endless" ? MODE_ENDLESS : MODE_COOP; }
+    if (getenv("BC_MODE")) { std::string m = getenv("BC_MODE"); G.mode = m == "raid" ? MODE_RAID : m == "versus" ? MODE_VERSUS : m == "endless" ? MODE_ENDLESS : MODE_COOP; }
     if (getenv("BC_MISSION")) G.mission = atoi(getenv("BC_MISSION"));
     if (s == "title") return;
     if (s == "icon") { G.state = ST_ICON; return; }
@@ -458,14 +466,18 @@ static void testSetup() {
     if (s == "help") { G.state = ST_HELP; return; }
     for (int i = 0; i < n; i++) { joinPlayer(i == 0 ? -1 : 1000 + i, false); if (G.bots) G.pl[i].cpu = true; }
     for (int i = 0; i < cpus; i++) joinPlayer(-9, true);
+    if (rivals() && joinedCount() < 2) joinPlayer(-9, true); // same as the lobby
     if (s == "lobby") { G.state = ST_LOBBY; return; }
     if (s == "missions") { G.state = ST_MISSIONS; return; }
     startGame();
     if (getenv("BC_ADVANCE")) {
         float secs = (float)atof(getenv("BC_ADVANCE"));
         for (float t = 0; t < secs && !G.result; t += 1 / 60.f) { for (auto& p : G.pl) if (p.joined) updatePlayer(p, 1 / 60.f); stepWorld(1 / 60.f); }
+        // BC_CAMFIGHT=1: point every view at the nearest fighter dogfight / raid (for screenshots)
+        if (getenv("BC_CAMFIGHT")) for (auto& q : G.pl) if (q.joined) { float bd = 1e18f; for (auto& f : G.fi) if (!f.dead && f.tk == 3 && f.team != q.team && G.st[f.tid].team == q.team) { float d = dist2(f.p, q.cam); if (d < bd) { bd = d; q.cam = f.p; } } q.cur = q.cam; }
+        if (getenv("BC_ZOOM")) for (auto& q : G.pl) if (q.joined) q.zoom = (float)atof(getenv("BC_ZOOM"));
         printf("test: advanced %.0fs: structs %d enemies %d waves %d minerals %.0f mined %.0f result %d\n", secs, (int)G.st.size(), (int)G.en.size(), G.waveN, G.teams[0].minerals, G.teams[0].mined, G.result);
-        for (int t = 0; t < G.nTeams; t++) { int alive = 0; for (auto& q : G.st) if (!q.dead && q.team == t) alive++; printf("test: team %d alive structs %d mined %.0f kills %d alive %d\n", t, alive, G.teams[t].mined, G.teams[t].kills, G.teams[t].alive); }
+        for (int t = 0; t < G.nTeams; t++) { int alive = 0; for (auto& q : G.st) if (!q.dead && q.team == t) alive++; { int nf = 0; for (auto& f : G.fi) if (f.team == t) nf++; printf("test: team %d alive structs %d mined %.0f kills %d alive %d fighters %d lost %d found %u\n", t, alive, G.teams[t].mined, G.teams[t].kills, G.teams[t].alive, nf, G.teams[t].ftrLost, G.teams[t].found); } }
     }
 }
 

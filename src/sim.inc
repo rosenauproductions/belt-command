@@ -1,6 +1,25 @@
 // Belt Command - simulation (included from main.cpp)
 
 static Enemy* enemyByUid(int uid) { for (auto& e : G.en) if (!e.dead && e.uid == uid) return &e; return nullptr; }
+static Fighter* fighterByUid(int uid) { for (auto& f : G.fi) if (!f.dead && f.uid == uid) return &f; return nullptr; }
+static void markFound(int t, int o);
+static void discoverCrystal(int team) {
+    Team& T = G.teams[team]; if (T.crystal) return;
+    T.crystal = true;
+    bool first = !G.crystalOut;
+    if (first) { // the first discovery refills the whole belt
+        G.crystalOut = true;
+        for (auto& a : G.ast) {
+            if (a.dead) { bool blocked = false; for (auto& s : G.st) if (!s.dead && dist(s.p, a.p) < a.r * 0.95f + s.r() + 4) blocked = true; if (blocked) continue; a.dead = false; a.minerals = 0; }
+            a.crystal = a.maxMin * 0.7f;
+        }
+    }
+    for (auto& a : G.ast) if (!a.dead && a.crystal > 0) ring(a.p, a.r * 0.5f, a.r * 1.4f, withA(C_CRY, 0.7f), 0.8f);
+    for (auto& q : G.pl) if (q.joined && q.team == team) toast(q, first ? "NEW MINERAL: CRYSTAL - ALL ASTEROIDS REFRESHED" : "CRYSTAL FOUND - MINE IT FOR 1.5X");
+    bool human = false; for (auto& q : G.pl) if (q.joined && q.team == team && !q.cpu) human = true;
+    if (human) AU.play(SND_WIN, 0.5f);
+    printf("research: team %d found crystal at %.0fs%s\n", team, G.time, first ? " (belt refreshed)" : "");
+}
 
 static void destroyStruct(int id, bool explodeIt = true) {
     Struct& s = G.st[id]; if (s.dead) return;
@@ -15,8 +34,9 @@ static void destroyStruct(int id, bool explodeIt = true) {
         for (auto& o : G.st) if (!o.dead && o.team == s.team) o.doomT = R.range(0.3f, 3.2f);
     }
 }
-static void damageStruct(int id, float dmg, V2 from) {
+static void damageStruct(int id, float dmg, V2 from, int byTeam = -1) {
     Struct& s = G.st[id]; if (s.dead) return;
+    if (byTeam >= 0 && byTeam != s.team) markFound(s.team, byTeam); // raid: being hit tells you where they are
     for (auto& sh : G.st) {
         if (sh.dead || sh.t != S_SHIELD || sh.team != s.team || !sh.powered || sh.charge <= 1) continue;
         if (dist(sh.p, s.p) > rangeOf(S_SHIELD, sh.lv)) continue;
@@ -36,6 +56,15 @@ static void damageEnemy(Enemy& e, float dmg, int team) {
         Col c = e.t == E_BOMBER ? Col(255, 130, 40) : e.t == E_SWARM ? Col(255, 80, 180) : C_ALIEN;
         explode(e.p, sz, c); sfxAt(e.t == E_MOTHER ? SND_BOOM_L : SND_BOOM_S, e.p, e.t == E_MOTHER ? 1.0f : 0.45f, 40);
         if (e.t == E_MOTHER) { shakeAt(e.p, 25); for (int i = 0; i < 6; i++) explode(e.p + fromAng(i * 1.05f) * 40, 30, c); }
+        if (team >= 0 && team < 4) G.teams[team].kills++;
+    }
+}
+static void damageFighter(Fighter& f, float dmg, int team) {
+    if (f.dead) return;
+    f.hp -= dmg; f.flash = 0.08f;
+    if (f.hp <= 0) {
+        f.dead = true; explode(f.p, 9, G.teams[f.team].col); sfxAt(SND_BOOM_S, f.p, 0.4f, 40);
+        G.teams[f.team].ftrLost++;
         if (team >= 0 && team < 4) G.teams[team].kills++;
     }
 }
@@ -146,7 +175,8 @@ static void updateStructs(float dt) {
 
     for (int i = 0; i < (int)G.st.size(); i++) {
         Struct& s = G.st[i]; if (s.dead) continue;
-        Team& T = G.teams[s.team];
+        Team& T = G.teams[s.team]; SPENDER = i;
+        if (s.t == S_SOLAR && s.powered) s.useAcc += 2.4f * lvm(s.lv) * dt;
         s.flash = std::max(0.f, s.flash - dt); s.beamT = std::max(0.f, s.beamT - dt); s.cd -= dt; s.spin += dt;
         if (s.doomT > 0) { s.doomT -= dt; if (s.doomT <= 0) { destroyStruct(i); continue; } }
         if (s.built < 1) {
@@ -161,16 +191,18 @@ static void updateStructs(float dt) {
         switch (s.t) {
         case S_MINER: {
             s.chk -= dt;
-            if (s.ast < 0 || G.ast[s.ast].dead || G.ast[s.ast].minerals <= 0 || s.chk <= 0) { s.ast = astInRange(s.p, rangeOf(S_MINER, 1)); s.chk = 2; }
+            if (s.ast < 0 || astLeft(G.ast[s.ast], s.team) <= 0 || s.chk <= 0) { s.ast = astInRange(s.p, rangeOf(S_MINER, 1), s.team); s.chk = 2; }
             s.mining = false;
             if (s.ast >= 0) {
                 Asteroid& a = G.ast[s.ast];
                 s.aim = std::atan2(a.p.y - s.p.y, a.p.x - s.p.x);
                 float rate = 3.5f * m * dt;
                 if (spend(T, 1.6f * m * dt)) {
-                    float got = std::min(rate, a.minerals); a.minerals -= got; T.minerals += got; T.mined += got; s.mining = true; s.spin += dt * 6;
-                    if (R.f() < dt * 4) { V2 sp = a.p + fromAng(R.range(0, 6.28f)) * a.r * 0.8f; addPart(P_DOT, sp, (s.p - sp) * 1.4f, 0.6f, C_MIN, 3); }
-                    if (a.minerals <= 0) { a.dead = true; explode(a.p, a.r * 0.6f, C_AST); for (int k = 0; k < 6; k++) addPart(P_DEBRIS, a.p, fromAng(R.range(0, 6.28f)) * R.range(10, 50), 2.0f, C_AST, R.range(6, 14)); sfxAt(SND_BOOM_S, a.p, 0.5f); }
+                    bool cry = a.minerals <= 0; float& pool = cry ? a.crystal : a.minerals;
+                    float got = std::min(rate, pool); pool -= got; if (cry) got *= CRYSTAL_VALUE;
+                    T.minerals += got; T.mined += got; s.mining = true; s.cryBeam = cry; s.useAcc += got; s.spin += dt * 6;
+                    if (R.f() < dt * 4) { V2 sp = a.p + fromAng(R.range(0, 6.28f)) * a.r * 0.8f; addPart(P_DOT, sp, (s.p - sp) * 1.4f, 0.6f, cry ? C_CRY : C_MIN, 3); }
+                    if (a.minerals <= 0 && a.crystal <= 0 && (G.crystalOut || !cry)) { a.dead = true; explode(a.p, a.r * 0.6f, C_AST); for (int k = 0; k < 6; k++) addPart(P_DEBRIS, a.p, fromAng(R.range(0, 6.28f)) * R.range(10, 50), 2.0f, C_AST, R.range(6, 14)); sfxAt(SND_BOOM_S, a.p, 0.5f); }
                 }
             }
             break;
@@ -179,8 +211,11 @@ static void updateStructs(float dt) {
             float range = rangeOf(s.t, s.lv);
             V2 tp; bool has = false; int eIdx = -1, sIdx = -1; float bd = 1e9;
             for (int k = 0; k < (int)G.en.size(); k++) { auto& e = G.en[k]; if (e.dead) continue; float d = dist(e.p, s.p) - ED[e.t].r; if (d < range && d < bd) { bd = d; eIdx = k; } }
+            int fIdx = -1;
+            if (eIdx < 0) for (int k = 0; k < (int)G.fi.size(); k++) { auto& f = G.fi[k]; if (f.dead || f.team == s.team) continue; float d = dist(f.p, s.p) - 7; if (d < range && d < bd) { bd = d; fIdx = k; } }
             if (eIdx >= 0) { tp = G.en[eIdx].p; has = true; }
-            else if (G.mode == MODE_VERSUS) {
+            else if (fIdx >= 0) { tp = G.fi[fIdx].p; has = true; }
+            else if (rivals()) {
                 for (int k = 0; k < (int)G.st.size(); k++) { auto& o = G.st[k]; if (o.dead || o.team == s.team || !G.teams[o.team].alive) continue; float d = dist(o.p, s.p) - o.r(); if (d < range && d < bd) { bd = d; sIdx = k; } }
                 if (sIdx >= 0) { tp = G.st[sIdx].p; has = true; }
             }
@@ -194,13 +229,13 @@ static void updateStructs(float dt) {
                 V2 muzzle = s.p + fromAng(s.aim) * 22;
                 G.beams.push_back({ muzzle, tp, 0.12f, 0.12f, 2.2f, T.col });
                 sparks(tp, 3, T.col, 90); sfxAt(SND_LASER, s.p, 0.35f, 45);
-                if (eIdx >= 0) damageEnemy(G.en[eIdx], 9 * m, s.team); else damageStruct(sIdx, 9 * m * 0.7f, s.p);
+                if (eIdx >= 0) damageEnemy(G.en[eIdx], 9 * m, s.team); else if (fIdx >= 0) damageFighter(G.fi[fIdx], 9 * m, s.team); else damageStruct(sIdx, 9 * m * 0.7f, s.p, s.team);
             } else {
                 if (T.minerals < 3 || !spend(T, 2)) break;
                 T.minerals -= 3; s.cd = 1.8f; s.beamT = 0.2f;
                 for (int side = -1; side <= 1; side += 2) {
                     Bullet b; b.p = s.p + rotv(V2(16, side * 5.f), s.aim); b.v = fromAng(s.aim + side * 0.25f) * 160; b.dmg = 34 * m * 0.5f; b.life = 4; b.splash = 55; b.team = s.team; b.missile = true;
-                    if (eIdx >= 0) b.tgtUid = G.en[eIdx].uid; else b.tgtStruct = sIdx;
+                    if (eIdx >= 0) b.tgtUid = G.en[eIdx].uid; else if (fIdx >= 0) b.tgtUid = G.fi[fIdx].uid; else b.tgtStruct = sIdx;
                     G.bl.push_back(b);
                 }
                 sfxAt(SND_MISSILE, s.p, 0.5f, 60);
@@ -226,7 +261,38 @@ static void updateStructs(float dt) {
             if (s.charge < cap) { float want = std::min(cap - s.charge, 15 * m * dt); if (spend(T, want)) s.charge += want; }
             break;
         }
+        case S_RESEARCH: {
+            if (T.crystal) break;
+            if (spend(T, 2.0f * dt)) { s.charge += dt / researchTime(s.lv); s.spin += dt * 3; }
+            if (s.charge >= 1) discoverCrystal(s.team);
+            break;
         }
+        case S_CARRIER: {
+            int have = 0, out = 0; for (auto& f : G.fi) if (!f.dead && f.home == i) { have++; if (f.sortie) out++; }
+            s.ast = have - out; // fighters on deck, shown on the carrier
+            // launch the squadron together once it is full (or right away on an attack order)
+            if (rivals() && out == 0 && have > 0 && (have >= carrierCap(s.lv) || T.order >= 0)) for (auto& f : G.fi) if (!f.dead && f.home == i) { f.sortie = true; f.retarget = 0; }
+            if (have >= carrierCap(s.lv)) { s.charge = 0; break; }
+            if (s.charge < 1) { if (spend(T, 1.2f * dt)) s.charge = std::min(1.f, s.charge + dt / FTR_BUILD); }
+            else if (T.minerals >= FTR_COST) {
+                T.minerals -= FTR_COST; s.charge = 0;
+                Fighter f; f.team = s.team; f.uid = G.uidNext++; f.home = i; f.ang = s.aim; f.p = s.p + fromAng(f.ang) * 26; f.v = fromAng(f.ang) * 80;
+                f.hp = f.maxhp = FTR_HP * m; f.dmg = FTR_DMG * m; f.orbitA = R.range(0, 6.28f);
+                G.fi.push_back(f); ring(f.p, 4, 18, withA(T.col, 0.8f), 0.3f); sfxAt(SND_PLACE, f.p, 0.4f, 80);
+            }
+            break;
+        }
+        }
+    }
+    SPENDER = -1;
+    // link flow: each link carries everything used, made and mined past it (links are listed parent before child)
+    for (auto& s : G.st) { if (s.dead) continue; s.flow += (s.useAcc / dt - s.flow) * std::min(1.f, dt * 2.5f); s.useAcc = 0; }
+    static std::vector<float> sub;
+    for (int t = 0; t < 4; t++) {
+        Team& T = G.teams[t]; if (!T.used) continue;
+        sub.assign(G.st.size(), 0.f); T.linkFlow.assign(T.links.size(), 0.f);
+        for (size_t k = 0; k < G.st.size(); k++) if (!G.st[k].dead && G.st[k].team == t) sub[k] = G.st[k].flow;
+        for (int j = (int)T.links.size() - 1; j >= 0; j--) { int pa = T.links[j].first, ch = T.links[j].second; T.linkFlow[j] = sub[ch]; sub[pa] += sub[ch]; }
     }
     for (int t = 0; t < 4; t++) { Team& T = G.teams[t]; T.drainRate += (T.drainAcc / dt - T.drainRate) * std::min(1.f, dt * 1.5f); T.drainAcc = 0; }
 }
@@ -262,8 +328,10 @@ static void updateEnemies(float dt) {
             }
             if (D.range > 0 && dTo < D.range && e.cd <= 0) {
                 e.cd = D.cd * R.range(0.85f, 1.15f);
+                V2 aimp = s.p; float fd = std::min(dTo, D.range * 0.8f);
+                for (auto& f : G.fi) if (!f.dead && dist(f.p, e.p) < fd) { fd = dist(f.p, e.p); aimp = f.p + f.v * (fd / 330); }
                 auto shoot = [&](float spread) {
-                    Bullet b; b.p = e.p + fromAng(e.ang) * D.r; V2 aimp = s.p; b.v = rotv(norm(aimp - b.p), spread) * 330; b.dmg = D.dmg; b.life = D.range / 330 * 1.6f; b.team = -1; G.bl.push_back(b);
+                    Bullet b; b.p = e.p + fromAng(e.ang) * D.r; b.v = rotv(norm(aimp - b.p), spread) * 330; b.dmg = D.dmg; b.life = D.range / 330 * 1.6f; b.team = -1; G.bl.push_back(b);
                 };
                 if (e.t == E_MOTHER) { shoot(-0.18f); shoot(0); shoot(0.18f); } else shoot(R.range(-0.05f, 0.05f));
                 sfxAt(SND_ALIEN, e.p, e.t == E_MOTHER ? 0.5f : 0.25f, 50);
@@ -280,13 +348,113 @@ static void updateEnemies(float dt) {
     }
     for (auto& p : pending) spawnEnemy(E_SWARM, p);
 }
+// ---------------------------------------------------------------- carrier fighters
+static void markFound(int t, int o) {
+    if (!raid() || t == o || t < 0 || o < 0 || (G.teams[t].found >> o & 1)) return;
+    G.teams[t].found |= 1u << o;
+    for (auto& q : G.pl) if (q.joined && q.team == t) { toast(q, "RIVAL BASE FOUND - P" + std::to_string(o + 1)); }
+    bool human = false; for (auto& q : G.pl) if (q.joined && q.team == t && !q.cpu) human = true;
+    if (human) AU.play(SND_ALERT, 0.5f);
+    printf("raid: team %d found team %d at %.0fs\n", t, o, G.time);
+}
+static void updateSight(float dt) {
+    if (!raid()) return;
+    G.seeT -= dt; if (G.seeT > 0) return; G.seeT = 0.3f;
+    for (int t = 0; t < G.nTeams; t++) {
+        if (!G.teams[t].alive) continue;
+        for (int o = 0; o < G.nTeams; o++) {
+            if (o == t || !G.teams[o].alive || (G.teams[t].found >> o & 1)) continue;
+            bool hit = false;
+            for (auto& a : G.st) { if (a.dead || a.team != o) continue;
+                for (auto& b : G.st) if (!b.dead && b.team == t && dist2(a.p, b.p) < SIGHT * SIGHT) { hit = true; break; }
+                if (!hit) for (auto& f : G.fi) if (!f.dead && f.team == t && dist2(a.p, f.p) < FTR_SIGHT * FTR_SIGHT) { hit = true; break; }
+                if (hit) break; }
+            if (hit) markFound(t, o);
+        }
+    }
+}
+// can team t see this point right now (its structures or fighters nearby)?
+static bool inSight(int t, V2 p) {
+    for (auto& b : G.st) if (!b.dead && b.team == t && dist2(p, b.p) < SIGHT * SIGHT) return true;
+    for (auto& f : G.fi) if (!f.dead && f.team == t && dist2(p, f.p) < FTR_SIGHT * FTR_SIGHT) return true;
+    return false;
+}
+static void updateFighters(float dt) {
+    for (int t = 0; t < 4; t++) { Team& T = G.teams[t]; T.orderT -= dt; if (T.order >= 0 && (T.orderT <= 0 || G.st[T.order].dead)) T.order = -1; }
+    for (auto& f : G.fi) {
+        if (f.dead) continue;
+        Struct& home = G.st[f.home];
+        if (home.dead || !G.teams[f.team].alive) { damageFighter(f, 1e9f, -1); continue; }
+        Team& T = G.teams[f.team];
+        f.flash = std::max(0.f, f.flash - dt); f.cd -= dt; f.retarget -= dt;
+        // is the current target still good?
+        V2 tp; bool has = false; float tr = 7;
+        if (f.tk == 1) { Enemy* e = enemyByUid(f.tid); if (e) { tp = e->p; tr = ED[e->t].r; has = true; } }
+        else if (f.tk == 2) { Fighter* o = fighterByUid(f.tid); if (o) { tp = o->p; has = true; } }
+        else if (f.tk == 3) { Struct& o = G.st[f.tid]; if (!o.dead && G.teams[o.team].alive) { tp = o.p; tr = o.r(); has = true; } }
+        if (!has) f.tk = 0;
+        if (f.retarget <= 0 || !has) {
+            f.retarget = R.range(0.35f, 0.6f); f.tk = 0; has = false;
+            float defR = rangeOf(S_CARRIER, home.lv), bd = 260;
+            for (auto& o : G.fi) if (!o.dead && o.team != f.team && dist(o.p, f.p) < bd && (!raid() || inSight(f.team, o.p))) { bd = dist(o.p, f.p); f.tk = 2; f.tid = o.uid; tp = o.p; tr = 7; has = true; }
+            if (!has) { bd = 1e9f; for (auto& e : G.en) if (!e.dead && dist(e.p, home.p) < defR) { float d = dist(e.p, f.p); if (d < bd) { bd = d; f.tk = 1; f.tid = e.uid; tp = e.p; tr = ED[e.t].r; has = true; } } }
+            if (!has && rivals() && f.sortie) {
+                if (T.order >= 0 && seen(f.team, G.st[T.order].team)) { f.tk = 3; f.tid = T.order; tp = G.st[T.order].p; tr = G.st[T.order].r(); has = true; }
+                else {
+                    bd = 1e18f;
+                    for (int k = 0; k < (int)G.st.size(); k++) {
+                        auto& o = G.st[k]; if (o.dead || o.team == f.team || !G.teams[o.team].alive) continue;
+                        if (raid() ? !seen(f.team, o.team) : dist(o.p, home.p) > defR) continue;
+                        float d = dist2(o.p, f.p); if (o.t == S_LASER || o.t == S_MISSILE) d *= 0.7f; /* knock out the guns first */ if (o.t == S_RESEARCH && !G.teams[o.team].crystal) d *= 0.5f; /* and stop their research */
+                        if (d < bd) { bd = d; f.tk = 3; f.tid = k; tp = o.p; tr = o.r(); has = true; }
+                    }
+                }
+            }
+        }
+        V2 want;
+        float dTo = has ? dist(tp, f.p) : 0;
+        if (has) {
+            V2 dir = (tp - f.p) / std::max(dTo, 1.f);
+            if (dTo > FTR_RANGE * 0.9f + tr) want = dir;
+            else want = perp(dir) * 0.9f + dir * ((dTo - tr - FTR_RANGE * 0.55f) / FTR_RANGE);
+            float face = std::atan2(dir.y, dir.x);
+            if (dTo < FTR_RANGE + tr && f.cd <= 0 && std::fabs(angDiff(f.ang, face)) < 0.9f) {
+                f.cd = FTR_CD * R.range(0.85f, 1.15f);
+                V2 hit = tp - dir * tr * 0.7f;
+                G.beams.push_back({ f.p + fromAng(f.ang) * 8, hit, 0.09f, 0.09f, 1.5f, T.col });
+                sparks(hit, 2, T.col, 70); sfxAt(SND_LASER, f.p, 0.18f, 70);
+                float dmg = f.dmg * ftrPower();
+                if (f.tk == 1) { Enemy* e = enemyByUid(f.tid); if (e) damageEnemy(*e, dmg, f.team); }
+                else if (f.tk == 2) { Fighter* o = fighterByUid(f.tid); if (o) damageFighter(*o, dmg, f.team); }
+                else if (f.tk == 3) damageStruct(f.tid, dmg, f.p, f.team);
+            }
+        } else {
+            f.sortie = false; // nothing left to hit: fly home and wait for the squadron
+            f.orbitA += dt * 1.1f; V2 spot = home.p + fromAng(f.orbitA) * 62;
+            want = (spot - f.p) / 60.f; if (len(want) > 1) want = norm(want);
+            f.hp = std::min(f.maxhp, f.hp + 6 * dt); // repairs on deck
+        }
+        V2 sep;
+        for (auto& o : G.fi) { if (&o == &f || o.dead) continue; V2 d = f.p - o.p; float l2 = len2(d); if (l2 < 400 && l2 > 0.01f) sep += d / std::sqrt(l2) * (1 - std::sqrt(l2) / 20); }
+        V2 dv = want + sep; if (len(dv) > 1) dv = norm(dv);
+        f.v += (dv * FTR_SPEED - f.v) * std::min(1.f, dt * 3.2f);
+        f.p += f.v * dt;
+        f.p.x = clampf(f.p.x, 20, G.WW - 20); f.p.y = clampf(f.p.y, 20, G.WH - 20);
+        float a = len2(f.v) > 4 ? std::atan2(f.v.y, f.v.x) : f.ang;
+        if (has && dTo < FTR_RANGE + tr) a = std::atan2(tp.y - f.p.y, tp.x - f.p.x);
+        f.ang += clampf(angDiff(f.ang, a), -7 * dt, 7 * dt);
+        if (R.f() < dt * 14) addPart(P_DOT, f.p - fromAng(f.ang) * 7, -fromAng(f.ang) * 30, 0.25f, mixc(T.col, C_WHITE, 0.3f), 2.2f);
+    }
+    G.fi.erase(std::remove_if(G.fi.begin(), G.fi.end(), [](const Fighter& f) { return f.dead; }), G.fi.end());
+}
+
 static void updateBullets(float dt) {
     for (auto& b : G.bl) {
         if (b.dead) continue;
         b.life -= dt; if (b.life <= 0) { b.dead = true; if (b.missile) { explode(b.p, 6, G.teams[b.team].col); } continue; }
         if (b.missile) {
             V2 tp; bool has = false;
-            if (b.tgtUid >= 0) { Enemy* e = enemyByUid(b.tgtUid); if (e) { tp = e->p; has = true; } else b.tgtUid = -1; }
+            if (b.tgtUid >= 0) { Enemy* e = enemyByUid(b.tgtUid); Fighter* f = e ? nullptr : fighterByUid(b.tgtUid); if (e) { tp = e->p; has = true; } else if (f) { tp = f->p; has = true; } else b.tgtUid = -1; }
             if (b.tgtUid < 0 && b.tgtStruct >= 0) { if (!G.st[b.tgtStruct].dead) { tp = G.st[b.tgtStruct].p; has = true; } else b.tgtStruct = -1; }
             if (!has && b.tgtUid < 0 && b.tgtStruct < 0) {
                 float bd = 350; for (auto& e : G.en) if (!e.dead && dist(e.p, b.p) < bd) { bd = dist(e.p, b.p); b.tgtUid = e.uid; }
@@ -298,14 +466,18 @@ static void updateBullets(float dt) {
             if (R.f() < dt * 40) addPart(P_DOT, b.p, b.v * -0.1f, 0.35f, Col(255, 200, 120), 2.5f);
             bool hit = false;
             for (auto& e : G.en) if (!e.dead && dist(e.p, b.p) < ED[e.t].r + 4) { hit = true; break; }
-            if (!hit && G.mode == MODE_VERSUS) for (auto& s : G.st) if (!s.dead && s.team != b.team && G.teams[s.team].alive && dist(s.p, b.p) < s.r() + 2) { hit = true; break; }
+            if (!hit) for (auto& f : G.fi) if (!f.dead && f.team != b.team && dist(f.p, b.p) < 11) { hit = true; break; }
+            if (!hit && rivals()) for (auto& s : G.st) if (!s.dead && s.team != b.team && G.teams[s.team].alive && dist(s.p, b.p) < s.r() + 2) { hit = true; break; }
             if (hit) {
                 b.dead = true; explode(b.p, 12, G.teams[b.team].col); sfxAt(SND_HIT, b.p, 0.5f);
                 for (auto& e : G.en) if (!e.dead && dist(e.p, b.p) < b.splash + ED[e.t].r) damageEnemy(e, b.dmg, b.team);
-                if (G.mode == MODE_VERSUS) for (int i = 0; i < (int)G.st.size(); i++) { auto& s = G.st[i]; if (!s.dead && s.team != b.team && dist(s.p, b.p) < b.splash + s.r()) damageStruct(i, b.dmg * 0.7f, b.p); }
+                for (auto& f : G.fi) if (!f.dead && f.team != b.team && dist(f.p, b.p) < b.splash + 7) damageFighter(f, b.dmg, b.team);
+                if (rivals()) for (int i = 0; i < (int)G.st.size(); i++) { auto& s = G.st[i]; if (!s.dead && s.team != b.team && dist(s.p, b.p) < b.splash + s.r()) damageStruct(i, b.dmg * 0.7f, b.p, b.team); }
             }
         } else {
             b.p += b.v * dt;
+            for (auto& f : G.fi) if (!f.dead && dist2(f.p, b.p) < 100) { b.dead = true; damageFighter(f, b.dmg, -1); sparks(b.p, 3, C_ALIEN, 70); break; }
+            if (b.dead) continue;
             for (int i = 0; i < (int)G.st.size(); i++) {
                 auto& s = G.st[i]; if (s.dead) continue;
                 if (dist2(s.p, b.p) < s.r() * s.r()) { b.dead = true; damageStruct(i, b.dmg, b.p - b.v * 0.05f); sparks(b.p, 3, C_ALIEN, 70); break; }
@@ -349,7 +521,7 @@ static bool findSpot(Player& p, int t, V2& out, V2 focus, bool hasFocus) {
         if (canPlace(p.team, t, q)) continue;
         float sc = R.range(0, 30);
         switch (t) {
-        case S_MINER: { int a = astInRange(q, rangeOf(S_MINER, 1)); if (a < 0) continue; sc += std::min(G.ast[a].minerals, 800.f) / (1 + G.ast[a].miners * 2.0f) - dist(q, G.ast[a].p) * 0.5f; break; }
+        case S_MINER: { int a = astInRange(q, rangeOf(S_MINER, 1), p.team); if (a < 0) continue; sc += std::min(astLeft(G.ast[a], p.team), 800.f) / (1 + G.ast[a].miners * 2.0f) - dist(q, G.ast[a].p) * 0.5f; break; }
         case S_SOLAR: case S_BATTERY: sc -= dist(q, hq); for (auto& o : G.st) if (!o.dead && o.team == p.team && (o.t == S_LASER || o.t == S_MISSILE) && dist(o.p, q) < rangeOf(o.t, o.lv)) sc += 25; break;
         case S_LASER: case S_MISSILE: {
             int cover = 0, near = 0;
@@ -358,8 +530,10 @@ static bool findSpot(Player& p, int t, V2& out, V2 focus, bool hasFocus) {
             if (hasFocus) sc -= dist(q, focus) * 0.4f;
             break;
         }
+        case S_RESEARCH: sc -= dist(q, hq); break;
         case S_REPAIR: case S_SHIELD: { int cover = 0; for (auto& o : G.st) if (!o.dead && o.team == p.team && dist(o.p, q) < rangeOf(t, 1)) cover++; sc += cover * 20; break; }
         case S_RELAY: sc -= hasFocus ? dist(q, focus) : -dist(q, hq) * 0.2f; break;
+        case S_CARRIER: { int near = 0; for (auto& o : G.st) if (!o.dead && o.team == p.team && (o.t == S_LASER || o.t == S_MISSILE) && dist(o.p, q) < 200) near++; sc += near * 30 - dist(q, hq) * 0.2f; if (hasFocus) sc -= dist(q, focus) * 0.3f; break; }
         }
         if (sc > best) { best = sc; out = q; found = true; }
     }
@@ -371,7 +545,7 @@ static void cpuThink(Player& p, float dt) {
         p.cur += (p.goal - p.cur) * std::min(1.f, dt * 6); p.goalWait -= dt;
         if (dist(p.cur, p.goal) < 8 || p.goalWait <= 0) {
             if (p.goalType == -2) tryUpgrade(p, p.goalStruct, true);
-            else { for (int k = 0; k < 8; k++) if (BUILDS[k] == p.goalType) p.sel = k; tryBuild(p, p.goalType, p.goal, true); }
+            else { for (int k = 0; k < NBUILD; k++) if (BUILDS[k] == p.goalType) p.sel = k; tryBuild(p, p.goalType, p.goal, true); }
             p.hasGoal = false; p.thinkT = R.range(0.3f, 0.9f);
         }
         return;
@@ -384,10 +558,26 @@ static void cpuThink(Player& p, float dt) {
     V2 hq = G.st[T.hq].p;
     for (auto& e : G.en) if (!e.dead && dist(e.p, hq) < fd) { fd = dist(e.p, hq); focus = e.p; hasFocus = true; }
     for (auto& w : G.warns) if (dist(w.p, hq) < fd) { fd = dist(w.p, hq); focus = w.p; hasFocus = true; }
+    // raid: guard toward found rivals, explore toward the nearest rival not found yet
+    V2 explore; bool hasExplore = false;
+    if (raid()) {
+        threat = tmin > 1.5f || T.found;
+        for (auto& f : G.fi) if (!f.dead && f.team != p.team && dist(f.p, hq) < 1200 && dist(f.p, hq) < fd) { fd = dist(f.p, hq); focus = f.p; hasFocus = true; threat = true; }
+        float ed = 1e9;
+        for (int o = 0; o < G.nTeams; o++) { if (o == p.team || !G.teams[o].alive) continue; V2 oh = G.st[G.teams[o].hq].p; float d = dist(oh, hq);
+            if (T.found >> o & 1) { if (!hasFocus) { focus = hq + norm(oh - hq) * 300; hasFocus = true; } }
+            else if (d < ed) { ed = d; explore = oh; hasExplore = true; } } // CPUs guess the corners, same as a person would
+        p.exploreT -= 0.5f;
+    }
+    int carrierWant = raid() ? (cnt[S_MINER] >= 3 ? 1 + (int)(tmin / 2.5f) : 0) : (turrets >= 5 ? turrets / 6 : 0);
     int choice;
     if (cnt[S_MINER] == 0) choice = S_MINER;
+    else if (raid() && hasExplore && p.exploreT <= 0 && T.minerals >= 120 && cnt[S_MINER] >= 3) { p.exploreT = R.range(6, 11); /* keep a reserve so miners still get built */ V2 spot; if (findSpot(p, S_RELAY, spot, explore, true)) { p.goal = spot; p.goalType = S_RELAY; p.hasGoal = true; p.goalWait = 2.5f; return; } choice = S_MINER; }
     else if (net < 1.5f && cnt[S_SOLAR] < 2 + cnt[S_MINER] * 1.5f + turrets * 0.7f) choice = S_SOLAR;
-    else if (threat && turrets < 1 + (int)(tmin * 1.7f)) choice = (turrets % 3 == 2 && T.minerals > 220) ? S_MISSILE : S_LASER;
+    else if (threat && turrets < 1 + (int)(tmin * (raid() ? 1.0f : 1.7f))) choice = (turrets % 3 == 2 && T.minerals > 220) ? S_MISSILE : S_LASER;
+    else if (cnt[S_CARRIER] < carrierWant) choice = S_CARRIER;
+    else if (cnt[S_RESEARCH] == 0 && !T.crystal && cnt[S_MINER] >= 4 && tmin > 2.5f) choice = S_RESEARCH;
+    else if (cnt[S_RESEARCH] > 0 && !T.crystal && T.minerals > 300) { for (int i = 0; i < (int)G.st.size(); i++) { auto& s = G.st[i]; if (!s.dead && s.team == p.team && s.t == S_RESEARCH && s.built >= 1 && s.lv < 3) { p.goal = s.p; p.goalType = -2; p.goalStruct = i; p.hasGoal = true; p.goalWait = 2; return; } } choice = -2; }
     else if (cnt[S_MINER] < 2 + (int)(tmin * 0.9f)) choice = S_MINER;
     else if (cnt[S_BATTERY] < cnt[S_SOLAR] / 4) choice = S_BATTERY;
     else if (turrets >= 4 && cnt[S_REPAIR] < turrets / 5) choice = S_REPAIR;
@@ -395,16 +585,16 @@ static void cpuThink(Player& p, float dt) {
     else choice = -2;
     if (choice == -2) {
         int bi = -1; int bl = 9;
-        for (int i = 0; i < (int)G.st.size(); i++) { auto& s = G.st[i]; if (s.dead || s.team != p.team || s.built < 1 || s.lv >= 3) continue; if (s.t != S_LASER && s.t != S_MISSILE && s.t != S_MINER && s.t != S_SOLAR) continue; if (s.lv < bl && T.minerals - 80 >= upgCost(s.t, s.lv)) { bl = s.lv; bi = i; } }
+        for (int i = 0; i < (int)G.st.size(); i++) { auto& s = G.st[i]; if (s.dead || s.team != p.team || s.built < 1 || s.lv >= 3) continue; if (s.t != S_LASER && s.t != S_MISSILE && s.t != S_MINER && s.t != S_SOLAR && s.t != S_CARRIER) continue; if (s.lv < bl && T.minerals - 80 >= upgCost(s.t, s.lv)) { bl = s.lv; bi = i; } }
         if (bi >= 0) { p.goal = G.st[bi].p; p.goalType = -2; p.goalStruct = bi; p.hasGoal = true; p.goalWait = 2; return; }
         choice = S_MINER;
     }
     if (T.minerals < SD[choice].cost) { p.thinkT = 0.8f; return; }
     V2 spot;
-    bool ok = findSpot(p, choice, spot, focus, hasFocus && (choice == S_LASER || choice == S_MISSILE));
+    bool ok = findSpot(p, choice, spot, focus, hasFocus && (choice == S_LASER || choice == S_MISSILE || choice == S_CARRIER));
     if (!ok && choice == S_MINER && T.minerals >= SD[S_RELAY].cost) {
         int ta = -1; float bd = 1e9;
-        for (int i = 0; i < (int)G.ast.size(); i++) { auto& a = G.ast[i]; if (a.dead || a.minerals < 100 || a.miners > 0) continue; float d = dist(a.p, hq); if (d < bd) { bd = d; ta = i; } }
+        for (int i = 0; i < (int)G.ast.size(); i++) { auto& a = G.ast[i]; if (astLeft(a, p.team) < 100 || a.miners > 0) continue; float d = dist(a.p, hq); if (d < bd) { bd = d; ta = i; } }
         if (ta >= 0 && findSpot(p, S_RELAY, spot, G.ast[ta].p, true)) { choice = S_RELAY; ok = true; }
     }
     if (ok) { p.goal = spot; p.goalType = choice; p.hasGoal = true; p.goalWait = 2.5f; }
@@ -414,16 +604,17 @@ static void cpuThink(Player& p, float dt) {
 static void finish(int result, int winner, const std::string& msg) {
     if (G.result) return;
     G.result = result; G.winner = winner; G.resultMsg = msg; G.resultT = 0; G.resultSel = 0;
+    printf("result: %d winner %d \"%s\" at %.0fs\n", result, winner, msg.c_str(), G.time);
     AU.play(result == 1 ? SND_WIN : SND_LOSE, 0.9f);
     if (result == 1 && G.mode == MODE_COOP) { G.opt.done |= 1u << G.mission; saveCfg(); }
     if (G.mode == MODE_ENDLESS && (int)G.time > G.opt.bestEndless) { G.opt.bestEndless = (int)G.time; saveCfg(); }
 }
 static void checkEnd() {
     if (G.result) return;
-    if (G.mode == MODE_VERSUS) {
+    if (rivals()) {
         int alive = 0, last = -1;
         for (int t = 0; t < G.nTeams; t++) if (G.teams[t].alive) { alive++; last = t; }
-        for (int t = 0; t < G.nTeams; t++) if (G.teams[t].alive && G.teams[t].mined >= G.M.target) { finish(1, t, "ECONOMIC VICTORY"); return; }
+        if (!raid()) for (int t = 0; t < G.nTeams; t++) if (G.teams[t].alive && G.teams[t].mined >= G.M.target) { finish(1, t, "ECONOMIC VICTORY"); return; }
         if (alive <= 1) finish(1, last, alive == 1 ? "LAST COMMAND STANDING" : "NO SURVIVORS");
         return;
     }
@@ -440,8 +631,10 @@ static void stepWorld(float dt) {
     if (G.result) dt *= std::max(0.15f, 1 - G.resultT);
     G.time += dt;
     updateStructs(dt);
-    updateWaves(dt);
+    if (!raid()) updateWaves(dt);
     updateEnemies(dt);
+    updateFighters(dt);
+    updateSight(dt);
     updateBullets(dt);
     updateFx(dt);
     G.en.erase(std::remove_if(G.en.begin(), G.en.end(), [](const Enemy& e) { return e.dead || e.p.x < -900 || e.p.y < -900 || e.p.x > G.WW + 900 || e.p.y > G.WH + 900; }), G.en.end());
@@ -463,27 +656,27 @@ static void layoutViews() {
     }
 }
 static void startGame() {
-    G.M = G.mode == MODE_VERSUS ? M_VERSUS : G.mode == MODE_ENDLESS ? M_ENDLESS : MISSIONS[G.mission];
-    G.st.clear(); G.en.clear(); G.bl.clear(); G.parts.clear(); G.beams.clear(); G.warns.clear(); G.pings.clear();
+    G.M = G.mode == MODE_RAID ? M_RAID : G.mode == MODE_VERSUS ? M_VERSUS : G.mode == MODE_ENDLESS ? M_ENDLESS : MISSIONS[G.mission];
+    G.st.clear(); G.en.clear(); G.bl.clear(); G.parts.clear(); G.beams.clear(); G.warns.clear(); G.pings.clear(); G.fi.clear(); G.seeT = 0; G.crystalOut = false;
     G.time = 0; G.waveN = 0; G.waveT = G.M.first; G.motherUid = -1; G.motherWarned = G.motherSpawned = false;
     G.result = 0; G.paused = false; G.uidNext = 1;
     for (auto& t : G.teams) t = Team();
     R.s = (uint32_t)(SDL_GetTicks() * 2654435761u) | 1;
     if (getenv("BC_SEED")) R.s = (uint32_t)atoi(getenv("BC_SEED")) | 1;
     int idx = 0, nj = 0;
-    for (auto& q : G.pl) if (q.joined) { q.team = G.mode == MODE_VERSUS ? idx : 0; idx++; nj++; }
-    G.nTeams = G.mode == MODE_VERSUS ? idx : 1;
+    for (auto& q : G.pl) if (q.joined) { q.team = rivals() ? idx : 0; idx++; nj++; }
+    G.nTeams = rivals() ? idx : 1;
     for (int t = 0; t < G.nTeams; t++) {
         Team& T = G.teams[t]; T.used = true;
         T.col = PCOL[0];
-        if (G.mode == MODE_VERSUS) for (auto& q : G.pl) if (q.joined && q.team == t) T.col = q.col;
-        T.minerals = G.mode == MODE_VERSUS ? 220 : 200 + 80.f * (nj - 1); T.energy = 150;
+        if (rivals()) for (auto& q : G.pl) if (q.joined && q.team == t) T.col = q.col;
+        T.minerals = rivals() ? 220 : 200 + 80.f * (nj - 1); T.energy = 150;
     }
     genWorld();
     for (int t = 0; t < G.nTeams; t++) recomputeNet(t);
     for (auto& q : G.pl) if (q.joined) {
         V2 hq = G.st[G.teams[q.team].hq].p;
-        q.cur = hq + V2(60.f * (q.idx % 2 ? 1 : -1), 60.f * (q.idx / 2 ? 1 : -1)); q.cam = hq; q.zoom = 0.85f; q.sel = 1; q.hover = -1; q.toastT = 0; q.shake = 0; q.hasGoal = false; q.thinkT = 1 + q.idx * 0.3f; q.yHold = 0;
+        q.cur = hq + V2(60.f * (q.idx % 2 ? 1 : -1), 60.f * (q.idx / 2 ? 1 : -1)); q.cam = hq; q.zoom = 0.85f; q.sel = 1; q.hover = -1; q.toastT = 0; q.shake = 0; q.hasGoal = false; q.thinkT = 1 + q.idx * 0.3f; q.yHold = 0; q.exploreT = R.range(15, 25);
     }
     layoutViews();
     G.state = ST_GAME; G.stateT = 0;
