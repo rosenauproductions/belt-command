@@ -8,5 +8,9 @@ mkdir -p web/dist
 em++ -std=c++17 -O2 -Wno-misleading-indentation src/main.cpp -o web/dist/index.html \
     -sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 -sENVIRONMENT=web -sEXPORTED_RUNTIME_METHODS=FS,UTF8ToString \
     --shell-file web/shell.html
+# stamp this build into the URLs the page asks for (index.js, index.wasm), so browsers never mix an old cached copy with a new one
+V=$(date +%Y%m%d%H%M%S)
+sed -i -e "s/__BUILD__/$V/g" -e "s/src=index.js>/src=index.js?v=$V>/; s/src=\"index.js\"/src=\"index.js?v=$V\"/" web/dist/index.html
+grep -q "index.js?v=$V" web/dist/index.html || { echo "build stamp missing in index.html"; exit 1; }
 cp art/icon.png web/dist/icon.png
 ls -la web/dist

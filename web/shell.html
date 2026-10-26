@@ -37,6 +37,7 @@
   var cover = document.getElementById('cover'), go = document.getElementById('go'), canvas = document.getElementById('canvas');
   var Module = {
     canvas: canvas,
+    locateFile: function (f) { return f + '?v=__BUILD__'; }, // new build = new URL, so a cached old index.wasm is never used
     print: function (t) { console.log(t); },
     printErr: function (t) { console.warn(t); },
     onRuntimeInitialized: function () { cover.classList.remove('loading'); go.textContent = 'CLICK TO PLAY'; }
