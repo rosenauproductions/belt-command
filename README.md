@@ -32,7 +32,7 @@ With one human player, versus and raid add a CPU rival automatically. X / Y in t
 | 9 | Carrier | 180 | Builds fighters (3 / 4 / 5 by level, 20 minerals each). Fighters guard the carrier against aliens and rival fighters. In versus and raid they wait until the squadron is full, then launch together at rival structures (guns and research first). In raid they only go after bases you have found. Point at a rival structure and press B (ping) to send every fighter at it. |
 | 0 | Research | 150 | Slowly studies the belt (6 minutes at level 1, faster with upgrades; uses energy the whole time, and progress is lost if it is destroyed). When it finishes your team discovers **crystal**: the first discovery refills every asteroid, including mined-out ones, with crystal. Only teams with research done can see and mine crystal, and it is worth 1.5x. |
 
-Network links glow brighter and thicker the more energy and minerals pass through them.
+**Multipath network.** Every structure links to every structure in reach (the dashed lines shown while placing), so the network is a web, not a single chain. Energy and minerals flow toward Command over all downhill routes, and each link takes a share by its spare room, so parallel paths share the load and a broken link only matters if there is no other way round. Each link has a capacity (16/s, x2 if a Relay or Command is at one end, +60% per level of the higher-level end). Busy links glow brighter; past 80% they turn orange, and overloaded links flash red. Everything that depends on an overloaded link works slower (down to 35% speed; the info panel shows it). Fix it by adding a second path or upgrading relays.
 
 ## Layout
 

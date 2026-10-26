@@ -51,7 +51,8 @@ static float rangeOf(int t, int lv) {
 static int carrierCap(int lv) { return 2 + lv; }
 static const float FTR_HP = 55, FTR_SPEED = 215, FTR_RANGE = 125, FTR_DMG = 6, FTR_CD = 0.45f, FTR_BUILD = 9, FTR_SIGHT = 300;
 static const int FTR_COST = 20;
-static const float SIGHT = 420; // raid mode: how far your structures can see
+static const float SIGHT = 420;
+static const float LINK_CAP = 16; // resources per second one plain link carries (relay / command links x2, more with levels) // raid mode: how far your structures can see
 static int upgCost(int t, int lv) { return t == S_HQ ? 250 * lv : std::max(20, (int)(SD[t].cost * 0.8f * lv)); }
 
 enum { E_SCOUT, E_FIGHTER, E_BOMBER, E_SWARM, E_MOTHER, E_N };
@@ -87,6 +88,7 @@ static const Col C_CRY(80, 255, 215), C_MIN(190, 140, 255), C_EN(250, 235, 100),
 struct Asteroid { V2 p; float r, minerals, maxMin, crystal = 0, rot, spin; std::vector<V2> shape, flecks; bool dead = false; int miners = 0; };
 struct Struct {
     int t, team, lv = 1; V2 p; float hp, maxhp, built = 0, cd = 0, charge = 0, flash = 0, invested = 0, doomT = -1, aim = 0, spin = 0, beamT = 0, chk = 0;
+    float hqDist = 0, supply = 1; // path length to Command; supply < 1 when the links it relies on are overloaded (it works slower)
     float useAcc = 0, flow = 0; // resources passing through this structure (energy used + made + mined), for the link glow
     bool dead = false, connected = false, powered = false, mining = false, cryBeam = false; int ast = -1; int builder = -1;
     float r() const { return SD[t].r; }
@@ -101,7 +103,8 @@ struct Warn { V2 p; float t, budget; bool mother; };
 struct Ping { V2 p; float t; int player; };
 struct Team {
     bool used = false, alive = true; int hq = -1; Col col; float minerals = 0, energy = 0, ecap = 150, eprod = 0, drainAcc = 0, drainRate = 0, mined = 0, lostAt = -1;
-    int kills = 0, built = 0, ftrLost = 0; bool crystal = false; unsigned found = 0; int order = -1; float orderT = 0; bool dirty = true; std::vector<std::pair<int, int>> links; std::vector<float> linkFlow;
+    int kills = 0, built = 0, ftrLost = 0; bool crystal = false; unsigned found = 0; int order = -1; float orderT = 0; bool dirty = true; std::vector<std::pair<int, int>> links; std::vector<float> linkFlow; // links: (nearer Command, farther)
+    std::vector<std::vector<std::pair<int, int>>> adj; std::vector<int> flowOrder; // per structure: (neighbour, link index); connected structures, farthest first
 };
 
 enum { B_A, B_B, B_X, B_Y, B_LB, B_RB, B_START, B_BACK, B_UP, B_DOWN, B_LEFT, B_RIGHT, NB };
@@ -292,25 +295,43 @@ static void genWorld() {
 
 // ---------------------------------------------------------------- network
 static float linkDist(int ta, int tb) { return std::max(SD[ta].link, SD[tb].link); }
+// Multipath network: every structure links to every structure it can reach (the dashed hints when placing),
+// so the network is a web, not a tree. Resources flow toward Command along all downhill routes, and each link
+// takes a share by its spare room, so parallel paths share the load. Each link has a capacity; an overloaded
+// link slows everything that depends on it (see Struct::supply). Relay / Command ends and levels carry more.
+static float linkCap(const Struct& a, const Struct& b) {
+    bool trunk = a.t == S_RELAY || a.t == S_HQ || b.t == S_RELAY || b.t == S_HQ;
+    return LINK_CAP * (trunk ? 2.f : 1.f) * (1 + 0.6f * (std::max(a.lv, b.lv) - 1));
+}
 static void recomputeNet(int team) {
-    Team& T = G.teams[team]; T.dirty = false; T.links.clear();
-    std::vector<int> ids; for (int i = 0; i < (int)G.st.size(); i++) if (!G.st[i].dead && G.st[i].team == team) { ids.push_back(i); G.st[i].connected = false; }
-    if (T.hq < 0 || G.st[T.hq].dead) { for (int i : ids) G.st[i].powered = false; return; }
-    // Prim from HQ over valid links gives both connectivity and a tidy tree to draw
-    int n = (int)ids.size(); std::vector<float> best(n, 1e18f); std::vector<int> par(n, -1); std::vector<char> in(n, 0);
-    int h = -1; for (int k = 0; k < n; k++) if (ids[k] == T.hq) h = k;
-    best[h] = 0;
+    Team& T = G.teams[team]; T.dirty = false; T.links.clear(); T.flowOrder.clear();
+    std::vector<int> ids; for (int i = 0; i < (int)G.st.size(); i++) if (!G.st[i].dead && G.st[i].team == team) { ids.push_back(i); G.st[i].connected = false; G.st[i].hqDist = 1e18f; }
+    T.adj.assign(G.st.size(), {});
+    if (T.hq < 0 || G.st[T.hq].dead) { for (int i : ids) G.st[i].powered = false; T.linkFlow.clear(); return; }
+    int n = (int)ids.size();
+    std::vector<std::vector<std::pair<int, float>>> nb(n); // neighbours within link range
+    for (int a = 0; a < n; a++) for (int b = a + 1; b < n; b++) {
+        Struct& sa = G.st[ids[a]]; Struct& sb = G.st[ids[b]]; float d = dist(sa.p, sb.p);
+        if (d <= linkDist(sa.t, sb.t)) { nb[a].push_back({ b, d }); nb[b].push_back({ a, d }); }
+    }
+    // shortest path length from Command (Dijkstra): gives connectivity and the "downhill" direction of flow
+    std::vector<float> dd(n, 1e18f); std::vector<char> done(n, 0);
+    for (int k = 0; k < n; k++) if (ids[k] == T.hq) dd[k] = 0;
     for (;;) {
         int u = -1; float bu = 1e17f;
-        for (int k = 0; k < n; k++) if (!in[k] && best[k] < bu) { bu = best[k]; u = k; }
+        for (int k = 0; k < n; k++) if (!done[k] && dd[k] < bu) { bu = dd[k]; u = k; }
         if (u < 0) break;
-        in[u] = 1; Struct& su = G.st[ids[u]]; su.connected = true;
-        if (par[u] >= 0) T.links.push_back({ ids[par[u]], ids[u] });
-        for (int k = 0; k < n; k++) if (!in[k]) {
-            Struct& sk = G.st[ids[k]]; float d = dist(su.p, sk.p);
-            if (d <= linkDist(su.t, sk.t) && d < best[k]) { best[k] = d; par[k] = u; }
-        }
+        done[u] = 1;
+        for (auto& e : nb[u]) if (dd[u] + e.second < dd[e.first]) dd[e.first] = dd[u] + e.second;
     }
+    for (int k = 0; k < n; k++) if (dd[k] < 1e17f) { Struct& s = G.st[ids[k]]; s.connected = true; s.hqDist = dd[k]; T.flowOrder.push_back(ids[k]); }
+    for (int a = 0; a < n; a++) for (auto& e : nb[a]) {
+        int b = e.first; if (b < a || dd[a] > 1e17f || dd[b] > 1e17f) continue;
+        int ia = ids[a], ib = ids[b]; if (dd[b] < dd[a]) std::swap(ia, ib); // first = nearer Command
+        int j = (int)T.links.size(); T.links.push_back({ ia, ib }); T.adj[ia].push_back({ ib, j }); T.adj[ib].push_back({ ia, j });
+    }
+    std::sort(T.flowOrder.begin(), T.flowOrder.end(), [](int x, int y) { return G.st[x].hqDist > G.st[y].hqDist; }); // farthest first
+    T.linkFlow.assign(T.links.size(), 0.f);
     for (int i : ids) G.st[i].powered = G.st[i].connected && G.st[i].built >= 1;
 }
 static int SPENDER = -1; // structure being updated, so energy use can be shown on its links
