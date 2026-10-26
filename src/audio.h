@@ -107,7 +107,13 @@ struct Audio {
     bool open() {
         build();
         SDL_AudioSpec want = {}, have = {};
-        want.freq = RATE; want.format = AUDIO_F32SYS; want.channels = 2; want.samples = 1024; want.callback = cb; want.userdata = this;
+        want.freq = RATE; want.format = AUDIO_F32SYS; want.channels = 2; want.samples =
+#ifdef __EMSCRIPTEN__
+            2048; // browsers run the audio callback on the main thread; a bigger buffer avoids crackles
+#else
+            1024;
+#endif
+        want.callback = cb; want.userdata = this;
         dev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
         if (!dev) { printf("audio: open failed: %s\n", SDL_GetError()); return false; }
         printf("audio: %d Hz, %d ch\n", have.freq, have.channels);

@@ -1,6 +1,11 @@
 // Belt Command - input, menus, main loop (included from main.cpp)
 
 static int PADTEST_HITS = 0; // BC_PADTEST: how many RB presses the game acted on
+#ifdef __EMSCRIPTEN__
+static const int NTITLE = 3; // a web page has nothing to quit to
+#else
+static const int NTITLE = 4;
+#endif
 static Dev* devById(int id) { for (auto& d : G.devs) if (d.id == id) return &d; return nullptr; }
 // a press counts exactly once: latched until the next game step or menu update uses it
 static bool pr(const Dev& d, int b) { return d.pend[b]; }
@@ -195,7 +200,7 @@ static void updateMenus(float dt) {
     MenuIn m = menuInput(); G.stateT += dt;
     switch (G.state) {
     case ST_TITLE: {
-        if (m.y) { G.menuSel = (G.menuSel + m.y + 4) % 4; AU.play(SND_UI, 0.6f); }
+        if (m.y) { G.menuSel = (G.menuSel + m.y + NTITLE) % NTITLE; AU.play(SND_UI, 0.6f); }
         if (m.a || m.start) {
             AU.play(SND_UI_OK, 0.7f);
             if (G.menuSel == 0) enterLobby(); else if (G.menuSel == 1) { G.state = ST_HELP; G.stateT = 0; } else if (G.menuSel == 2) { G.state = ST_OPTIONS; G.menuSel = 0; } else G.quit = true;
@@ -259,7 +264,7 @@ static void renderMenus(Canvas& cv) {
     case ST_TITLE: {
         drawLogo(cv, cx, G.H * 0.2f, 96 * u);
         const char* items[4] = { "PLAY", "HOW TO PLAY", "OPTIONS", "QUIT" };
-        menuList(cv, items, 4, G.menuSel, cx, G.H * 0.52f, 34 * u, 62 * u);
+        menuList(cv, items, NTITLE, G.menuSel, cx, G.H * 0.52f, 34 * u, 62 * u);
         FONT.draw(cv, "1-4 PLAYERS  -  SPLIT SCREEN", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.9f), 1);
         break;
     }
@@ -498,38 +503,17 @@ static void testSetup() {
     }
 }
 
-int main(int argc, char** argv) {
-    (void)argc; (void)argv;
-    setvbuf(stdout, nullptr, _IOLBF, 0);
-    printf("Belt Command starting\n");
-    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
-    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) { printf("SDL_Init failed: %s\n", SDL_GetError()); return 1; }
-    SDL_version lv; SDL_GetVersion(&lv); printf("sdl: %d.%d.%d, video driver %s\n", lv.major, lv.minor, lv.patch, SDL_GetCurrentVideoDriver());
-    const char* home = getenv("BC_HOME"); char* base = SDL_GetBasePath();
-    G.cfgPath = std::string(home ? home : (base ? base : "./")) + (home ? "/" : "") + "beltcommand.cfg"; if (base) SDL_free(base);
-    loadCfg();
-    if (getenv("BC_SHOT")) G.shotFrame = atoi(getenv("BC_SHOT"));
-    if (getenv("BC_SHOT_PATH")) G.shotPath = getenv("BC_SHOT_PATH");
-    if (getenv("BC_BOTS")) G.bots = true;
-    if (getenv("BC_RES")) G.opt.res = atoi(getenv("BC_RES"));
-    if (getenv("BC_GLOW")) G.opt.glow = atoi(getenv("BC_GLOW")) != 0;
-    Uint32 wf = SDL_WINDOW_FULLSCREEN_DESKTOP; int ww = 1280, wh = 720;
-    if (getenv("BC_WINDOW")) { wf = 0; sscanf(getenv("BC_WINDOW"), "%dx%d", &ww, &wh); }
-    G.win = SDL_CreateWindow("Belt Command", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, ww, wh, wf | SDL_WINDOW_ALLOW_HIGHDPI);
-    if (!G.win) { printf("window failed: %s\n", SDL_GetError()); return 1; }
-    G.ren = SDL_CreateRenderer(G.win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_TARGETTEXTURE);
-    if (!G.ren) G.ren = SDL_CreateRenderer(G.win, -1, SDL_RENDERER_TARGETTEXTURE);
-    if (!G.ren) { printf("renderer failed: %s\n", SDL_GetError()); return 1; }
-    SDL_RendererInfo ri; SDL_GetRendererInfo(G.ren, &ri); printf("renderer: %s\n", ri.name);
-    SDL_ShowCursor(SDL_DISABLE);
-    setupTarget();
-    if (!getenv("BC_MUTE")) AU.open();
-    applyAudioVol();
-    Dev kb; kb.id = -1; kb.name = "KEYBOARD"; G.devs.push_back(kb);
-    testSetup();
-    Uint64 last = SDL_GetPerformanceCounter(); double acc = 0; float fpsT = 0; int fpsN = 0;
-    while (!G.quit) {
+// one frame: events, input, fixed 60 Hz game steps, draw. Returns false to stop (native only).
+static struct { Uint64 last = 0; double acc = 0; float fpsT = 0; int fpsN = 0; } LOOP;
+static bool frame() {
+#ifdef __EMSCRIPTEN__
+    { // follow the browser window size
+        int cw = EM_ASM_INT({ return window.innerWidth; }), ch = EM_ASM_INT({ return window.innerHeight; }); int ww, wh; SDL_GetWindowSize(G.win, &ww, &wh);
+        if (cw > 0 && ch > 0 && (cw != ww || ch != wh)) { SDL_SetWindowSize(G.win, cw, ch); setupTarget(); if (G.state == ST_GAME) layoutViews(); }
+    }
+#endif
+    double& acc = LOOP.acc; float& fpsT = LOOP.fpsT; int& fpsN = LOOP.fpsN; Uint64& last = LOOP.last;
+    {
         for (auto& d : G.devs) { d.mouseMoved = false; d.wheel = 0; }
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -580,11 +564,56 @@ int main(int argc, char** argv) {
         if (benchN && G.frame == 10 + benchN) { double s = (double)(SDL_GetPerformanceCounter() - benchT0) / SDL_GetPerformanceFrequency(); printf("bench: %d frames in %.2fs = %.1f fps\n", benchN, s, benchN / s); G.quit = true; }
         bool shot = G.shotFrame >= 0 && G.frame == G.shotFrame;
         renderFrame(shot);
-        if (shot) break;
+        if (shot) return false;
     }
+    return true;
+}
+
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+    printf("Belt Command starting\n");
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) { printf("SDL_Init failed: %s\n", SDL_GetError()); return 1; }
+    SDL_version lv; SDL_GetVersion(&lv); printf("sdl: %d.%d.%d, video driver %s\n", lv.major, lv.minor, lv.patch, SDL_GetCurrentVideoDriver());
+    const char* home = getenv("BC_HOME"); char* base = SDL_GetBasePath();
+    G.cfgPath = std::string(home ? home : (base ? base : "./")) + (home ? "/" : "") + "beltcommand.cfg"; if (base) SDL_free(base);
+    loadCfg();
+    if (getenv("BC_SHOT")) G.shotFrame = atoi(getenv("BC_SHOT"));
+    if (getenv("BC_SHOT_PATH")) G.shotPath = getenv("BC_SHOT_PATH");
+    if (getenv("BC_BOTS")) G.bots = true;
+    if (getenv("BC_RES")) G.opt.res = atoi(getenv("BC_RES"));
+    if (getenv("BC_GLOW")) G.opt.glow = atoi(getenv("BC_GLOW")) != 0;
+#ifdef __EMSCRIPTEN__
+    SDL_SetHint(SDL_HINT_EMSCRIPTEN_KEYBOARD_ELEMENT, "#canvas");
+    Uint32 wf = SDL_WINDOW_RESIZABLE; int ww = EM_ASM_INT({ return window.innerWidth; }), wh = EM_ASM_INT({ return window.innerHeight; });
+#else
+    Uint32 wf = SDL_WINDOW_FULLSCREEN_DESKTOP; int ww = 1280, wh = 720;
+#endif
+    if (getenv("BC_WINDOW")) { wf = 0; sscanf(getenv("BC_WINDOW"), "%dx%d", &ww, &wh); }
+    G.win = SDL_CreateWindow("Belt Command", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, ww, wh, wf | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!G.win) { printf("window failed: %s\n", SDL_GetError()); return 1; }
+    G.ren = SDL_CreateRenderer(G.win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_TARGETTEXTURE);
+    if (!G.ren) G.ren = SDL_CreateRenderer(G.win, -1, SDL_RENDERER_TARGETTEXTURE);
+    if (!G.ren) { printf("renderer failed: %s\n", SDL_GetError()); return 1; }
+    SDL_RendererInfo ri; SDL_GetRendererInfo(G.ren, &ri); printf("renderer: %s\n", ri.name);
+    SDL_ShowCursor(SDL_DISABLE);
+    setupTarget();
+    if (!getenv("BC_MUTE")) AU.open();
+    applyAudioVol();
+    Dev kb; kb.id = -1; kb.name = "KEYBOARD"; G.devs.push_back(kb);
+    testSetup();
+    LOOP.last = SDL_GetPerformanceCounter();
+#ifdef __EMSCRIPTEN__
+    emscripten_set_main_loop([] { frame(); }, 0, 1); // the browser calls frame() once per display refresh
+#else
+    while (!G.quit && frame()) {}
+#endif
     saveCfg();
     AU.close();
     SDL_DestroyRenderer(G.ren); SDL_DestroyWindow(G.win); SDL_Quit();
     printf("Belt Command exit\n");
     return 0;
 }
+

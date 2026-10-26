@@ -57,6 +57,19 @@ apt-get install -y libsdl2-dev
 
 The release build uses zig as the C++ compiler, targets glibc 2.28 and links the box's own `libSDL2-2.0.so.0` (needs SDL 2.0.18 or newer).
 
+## Browser version
+
+The same code builds for the web with Emscripten (SDL2 for WebGL, WebAudio and the browser gamepad API):
+
+```
+source /path/to/emsdk/emsdk_env.sh
+./web/build.sh        # -> web/dist (index.html, index.js, index.wasm, icon.png)
+```
+
+`web/dist` is committed, so Vercel serves it as static files with no build step (project root directory `web/dist`). Keyboard + mouse is player 1; gamepads join as on Batocera. Settings are kept in the browser's localStorage. Sound starts after the first click (browser rule). There is no touch control yet.
+
+Wii U: see `docs/WIIU_PLAN.md` (on hold).
+
 ## Install on Batocera
 
 Copy to the share (`/userdata/roms/ports`):

@@ -6,6 +6,9 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 static Font FONT;
 static Audio AU;
@@ -153,8 +156,14 @@ static void saveCfg() {
     FILE* f = fopen(G.cfgPath.c_str(), "w"); if (!f) return;
     fprintf(f, "res=%d\nglow=%d\nshake=%d\nsfx=%d\nmusic=%d\ndone=%u\nbest_endless=%d\n", G.opt.res, G.opt.glow, G.opt.shake, G.opt.sfx, G.opt.mus, G.opt.done, G.opt.bestEndless);
     fclose(f);
+#ifdef __EMSCRIPTEN__ // the browser keeps settings in localStorage
+    EM_ASM({ try { localStorage.setItem('beltcommand.cfg', FS.readFile(UTF8ToString($0), { encoding: 'utf8' })); } catch (e) {} }, G.cfgPath.c_str());
+#endif
 }
 static void loadCfg() {
+#ifdef __EMSCRIPTEN__
+    EM_ASM({ try { var t = localStorage.getItem('beltcommand.cfg'); if (t) FS.writeFile(UTF8ToString($0), t); } catch (e) {} }, G.cfgPath.c_str());
+#endif
     FILE* f = fopen(G.cfgPath.c_str(), "r"); if (!f) return;
     char k[64]; long v;
     while (fscanf(f, " %63[^=]=%ld", k, &v) == 2) {
