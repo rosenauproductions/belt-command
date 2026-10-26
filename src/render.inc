@@ -350,6 +350,19 @@ static const char* btnLab(int devId, int b) {
     return "?";
 }
 
+// build bar layout (shared by drawing and mouse clicks)
+struct Bar { float slot, gap, sx, sy; };
+static Bar barOf(const SDL_Rect& vp) {
+    float u = hudU(vp); Bar b; b.slot = 66 * u; b.gap = 7 * u; float total = NBUILD * b.slot + (NBUILD - 1) * b.gap;
+    if (total > vp.w * 0.94f) { float sc = vp.w * 0.94f / total; b.slot *= sc; b.gap *= sc; total = vp.w * 0.94f; }
+    b.sx = vp.x + (vp.w - total) / 2; b.sy = vp.y + vp.h - b.slot - 34 * u; return b;
+}
+static int barSlotAt(const SDL_Rect& vp, V2 m) {
+    Bar b = barOf(vp); if (m.y < b.sy || m.y > b.sy + b.slot) return -1;
+    for (int i = 0; i < NBUILD; i++) { float x = b.sx + i * (b.slot + b.gap); if (m.x >= x && m.x <= x + b.slot) return i; }
+    return -1;
+}
+
 static void drawObjective(Canvas& cv, const Player& p, float u, float leftEdge, float rightEdge) {
     const SDL_Rect& vp = p.vp; float cx = (leftEdge + rightEdge) * 0.5f, y = vp.y + 14 * u; Team& T = G.teams[p.team]; float room = rightEdge - leftEdge;
     std::string line; float prog = -1;
@@ -418,9 +431,7 @@ static void drawHud(Canvas& cv, Player& p) {
     for (auto& f : G.fi) if (!f.dead && f.team != p.team && shown < 16 && dist(f.p, p.cam) < 1600 && fighterSeen(p.team, f)) { edgeArrow(f.p, G.teams[f.team].col, 8 * u); shown++; }
     for (auto& pg : G.pings) if (G.pl[pg.player].team == p.team && pg.player != p.idx) edgeArrow(pg.p, G.pl[pg.player].col, 12 * u);
     // build bar
-    float slot = 66 * u, gap = 7 * u; float total = NBUILD * slot + (NBUILD - 1) * gap;
-    if (total > vp.w * 0.94f) { float sc = vp.w * 0.94f / total; slot *= sc; gap *= sc; total = vp.w * 0.94f; }
-    float sx = vp.x + (vp.w - total) / 2, sy = vp.y + vp.h - slot - 34 * u;
+    Bar bar = barOf(vp); float slot = bar.slot, gap = bar.gap, sx = bar.sx, sy = bar.sy;
     for (int i = 0; i < NBUILD; i++) {
         int t = BUILDS[i]; float ox = sx + i * (slot + gap); bool sel = i == p.sel; bool afford = T.minerals >= SD[t].cost;
         cv.rect(ox, sy, slot, slot, sel ? Col(20, 30, 45, 230) : Col(6, 9, 15, 200));
@@ -438,6 +449,7 @@ static void drawHud(Canvas& cv, Player& p) {
     FONT.draw(cv, buf, V2(vp.x + vp.w * 0.5f, sy - 22 * u), 14 * u, withA(C_WHITE, 0.9f), 1);
     char hint[200];
     if (p.dev == -9) snprintf(hint, sizeof hint, "CPU");
+    else if (p.dev == -1) snprintf(hint, sizeof hint, raid() ? "WASD SCROLL   CLICK BUILD   CLICK ICON OR 1-0 PICK   U UPGRADE   HOLD R RECYCLE   RIGHT-CLICK ATTACK   TAB MAP" : "WASD SCROLL   CLICK BUILD   CLICK ICON OR 1-0 PICK   U UPGRADE   HOLD R RECYCLE   RIGHT-CLICK PING   TAB MAP");
     else snprintf(hint, sizeof hint, raid() ? "%s/%s SELECT   %s BUILD   %s UPGRADE   HOLD %s RECYCLE   %s PING / ATTACK   %s MAP" : "%s/%s SELECT   %s BUILD   %s UPGRADE   HOLD %s RECYCLE   %s PING   %s MAP", btnLab(p.dev, B_LB), btnLab(p.dev, B_RB), btnLab(p.dev, B_A), btnLab(p.dev, B_X), btnLab(p.dev, B_Y), btnLab(p.dev, B_B), btnLab(p.dev, B_BACK));
     float hs = std::min(11 * u, vp.w * 0.95f / std::max(1.f, (float)strlen(hint)));
     FONT.draw(cv, hint, V2(vp.x + vp.w * 0.5f, vp.y + vp.h - 20 * u), hs, withA(C_DIM, 0.95f), 1, 0, 0);

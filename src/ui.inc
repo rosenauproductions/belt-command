@@ -7,9 +7,45 @@ static const int NTITLE = 3; // a web page has nothing to quit to
 static const int NTITLE = 4;
 #endif
 static Dev* devById(int id) { for (auto& d : G.devs) if (d.id == id) return &d; return nullptr; }
+static Dev* kbd() { return devById(-1); }
 // a press counts exactly once: latched until the next game step or menu update uses it
 static bool pr(const Dev& d, int b) { return d.pend[b]; }
-static void usePresses() { for (auto& d : G.devs) memset(d.pend, 0, sizeof d.pend); }
+static void usePresses() { for (auto& d : G.devs) { memset(d.pend, 0, sizeof d.pend); d.clickPend = false; d.digit = -1; } }
+// mouse on menus: menuList() records where it drew its items, so hovering selects and clicking activates
+static struct { int n = 0, frame = -9; float cx = 0, y = 0, size = 0, gap = 0, w[12] = {}; } MH;
+static struct { float mx = 0, my = 0, mw = 0, mh = 0, sx = 0, sy = 0, sw = 0, sh = 0; int frame = -9; } LB; // lobby: mode label, start button
+static Dev* kbd();
+static bool mouseIn(float x, float y, float w, float h) { Dev* k = kbd(); return k && k->mouse.x >= x && k->mouse.x <= x + w && k->mouse.y >= y && k->mouse.y <= y + h; }
+static int menuMouse(int& sel, bool& click) { // hover selects; returns the item clicked, or -1
+    Dev* k = kbd(); click = false; if (!k || MH.frame < G.frame - 2) return -1;
+    int h = -1;
+    for (int i = 0; i < MH.n; i++) { float w = MH.w[i] + MH.size * 3; if (mouseIn(MH.cx - w / 2, MH.y + i * MH.gap - MH.gap * 0.25f, w, MH.gap * 0.9f)) h = i; }
+    if (h >= 0 && k->mouseMoved && sel != h) { sel = h; AU.play(SND_UI, 0.4f); }
+    if (h >= 0 && k->clickPend) { sel = h; click = true; }
+    return click ? h : -1;
+}
+// keyboard keys as buttons, from SDL key events (same mapping as readDevs) so quick taps are never lost
+static void keyHit(Dev& d, SDL_Scancode sc, bool inGame) {
+    switch (sc) {
+    case SDL_SCANCODE_SPACE: d.hit[B_A] = true; break;
+    case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: d.hit[B_A] = true; if (!inGame) d.hit[B_START] = true; break;
+    case SDL_SCANCODE_BACKSPACE: d.hit[B_B] = true; break;
+    case SDL_SCANCODE_ESCAPE: d.hit[inGame ? B_START : B_B] = true; break;
+    case SDL_SCANCODE_P: d.hit[B_START] = true; break;
+    case SDL_SCANCODE_U: case SDL_SCANCODE_F: d.hit[B_X] = true; break;
+    case SDL_SCANCODE_R: case SDL_SCANCODE_DELETE: d.hit[B_Y] = true; break;
+    case SDL_SCANCODE_Q: case SDL_SCANCODE_PAGEUP: d.hit[B_LB] = true; break;
+    case SDL_SCANCODE_E: case SDL_SCANCODE_PAGEDOWN: d.hit[B_RB] = true; break;
+    case SDL_SCANCODE_TAB: d.hit[B_BACK] = true; break;
+    case SDL_SCANCODE_W: case SDL_SCANCODE_UP: d.hit[B_UP] = true; break;
+    case SDL_SCANCODE_S: case SDL_SCANCODE_DOWN: d.hit[B_DOWN] = true; break;
+    case SDL_SCANCODE_A: case SDL_SCANCODE_LEFT: d.hit[B_LEFT] = true; break;
+    case SDL_SCANCODE_D: case SDL_SCANCODE_RIGHT: d.hit[B_RIGHT] = true; break;
+    default:
+        if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_9) d.digit = sc - SDL_SCANCODE_1;
+        else if (sc == SDL_SCANCODE_0) d.digit = 9;
+    }
+}
 static int padButton(int sdlButton) {
     switch (sdlButton) {
     case SDL_CONTROLLER_BUTTON_A: return B_A; case SDL_CONTROLLER_BUTTON_B: return B_B; case SDL_CONTROLLER_BUTTON_X: return B_X; case SDL_CONTROLLER_BUTTON_Y: return B_Y;
@@ -63,7 +99,7 @@ static void readDevs(float dt, bool inGame) {
             if (k[SDL_SCANCODE_A] || k[SDL_SCANCODE_LEFT]) { d.mv.x -= 1; d.b[B_LEFT] = true; }
             if (k[SDL_SCANCODE_D] || k[SDL_SCANCODE_RIGHT]) { d.mv.x += 1; d.b[B_RIGHT] = true; }
             d.ml = (mb & SDL_BUTTON_LMASK) != 0; d.mr = (mb & SDL_BUTTON_RMASK) != 0;
-            d.b[B_A] = k[SDL_SCANCODE_SPACE] || k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_KP_ENTER] || d.ml;
+            d.b[B_A] = k[SDL_SCANCODE_SPACE] || k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_KP_ENTER]; // mouse clicks arrive as events (d.click)
             d.b[B_B] = k[SDL_SCANCODE_BACKSPACE] || d.mr || (!inGame && k[SDL_SCANCODE_ESCAPE]);
             d.b[B_X] = k[SDL_SCANCODE_U] || k[SDL_SCANCODE_F];
             d.b[B_Y] = k[SDL_SCANCODE_R] || k[SDL_SCANCODE_DELETE];
@@ -92,6 +128,7 @@ static void readDevs(float dt, bool inGame) {
             float ry = SDL_GameControllerGetAxis(d.gc, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.f;
             if (ry > 0.4f) d.tr = std::max(d.tr, (ry - 0.4f) / 0.6f); else if (ry < -0.4f) d.tl = std::max(d.tl, (-ry - 0.4f) / 0.6f);
         }
+        if (d.click) { d.clickPend = true; if (inGame) d.pend[B_A] = true; d.click = false; }
         for (int k = 0; k < NB; k++) {
             if (d.hit[k]) d.b[k] = true; // a tap that went down and up between reads still counts as held this frame
             if ((d.b[k] && !d.pb[k]) || d.hit[k]) d.pend[k] = true;
@@ -127,27 +164,34 @@ static void updatePlayer(Player& p, float dt) {
     // zoom
     float z = (d->tr - d->tl) * dt * 1.3f; if (d->wheel != 0) { z -= d->wheel * 0.1f; }
     p.zoom = clampf(p.zoom * (1 - z), 0.4f, 1.7f);
-    // cursor movement
-    float m = len(d->mv);
-    float spd = (160 + 1150 * m * m) / p.zoom;
-    p.cur += d->mv * (spd * dt);
     float vs = viewScale(p);
-    if (d->id == -1 && d->mouseMoved) {
+    int barSlot = -1;
+    if (d->id == -1) {
+        // keyboard + mouse: WASD / arrows scroll the map, the mouse only points (no edge scrolling)
+        V2 off = p.cur - p.cam;
+        p.cam += d->mv * (900 / p.zoom * dt);
+        p.cam.x = clampf(p.cam.x, -150, G.WW + 150); p.cam.y = clampf(p.cam.y, -150, G.WH + 150);
         V2 ms = d->mouse;
-        if (ms.x >= p.vp.x && ms.x < p.vp.x + p.vp.w && ms.y >= p.vp.y && ms.y < p.vp.y + p.vp.h) { View v; v.vp = p.vp; v.cam = p.cam; v.s = vs; p.cur = v.s2w(ms); }
-        // mouse near the edge scrolls
+        if (ms.x >= p.vp.x && ms.x < p.vp.x + p.vp.w && ms.y >= p.vp.y && ms.y < p.vp.y + p.vp.h) { View v; v.vp = p.vp; v.cam = p.cam; v.s = vs; p.cur = v.s2w(ms); barSlot = barSlotAt(p.vp, ms); }
+        else p.cur = p.cam + off;
+    } else {
+        // pads: the stick moves the cursor and the view follows it
+        float m = len(d->mv);
+        float spd = (160 + 1150 * m * m) / p.zoom;
+        p.cur += d->mv * (spd * dt);
+        p.cur.x = clampf(p.cur.x, -100, G.WW + 100); p.cur.y = clampf(p.cur.y, -100, G.WH + 100);
+        float hx = p.vp.w * 0.5f / vs, hy = p.vp.h * 0.5f / vs, bx = hx * 0.55f, by = hy * 0.5f;
+        if (p.cur.x > p.cam.x + bx) p.cam.x = p.cur.x - bx; if (p.cur.x < p.cam.x - bx) p.cam.x = p.cur.x + bx;
+        if (p.cur.y > p.cam.y + by) p.cam.y = p.cur.y - by; if (p.cur.y < p.cam.y - by) p.cam.y = p.cur.y + by;
     }
-    p.cur.x = clampf(p.cur.x, -100, G.WW + 100); p.cur.y = clampf(p.cur.y, -100, G.WH + 100);
-    float hx = p.vp.w * 0.5f / vs, hy = p.vp.h * 0.5f / vs, bx = hx * 0.55f, by = hy * 0.5f;
-    if (p.cur.x > p.cam.x + bx) p.cam.x = p.cur.x - bx; if (p.cur.x < p.cam.x - bx) p.cam.x = p.cur.x + bx;
-    if (p.cur.y > p.cam.y + by) p.cam.y = p.cur.y - by; if (p.cur.y < p.cam.y - by) p.cam.y = p.cur.y + by;
     p.hover = hoverAt(p.team, p.cur, rivals());
     if (p.hover >= 0 && !seen(p.team, G.st[p.hover].team)) p.hover = -1;
     p.bigMap = d->b[B_BACK];
     if (!T.alive) return;
     if (pr(*d, B_LB)) { p.sel = (p.sel + NBUILD - 1) % NBUILD; AU.play(SND_UI, 0.5f); }
     if (pr(*d, B_RB)) { p.sel = (p.sel + 1) % NBUILD; AU.play(SND_UI, 0.5f); PADTEST_HITS++; }
-    if (d->id == -1) { const Uint8* k = SDL_GetKeyboardState(nullptr); for (int i = 0; i < NBUILD; i++) if (k[i == 9 ? SDL_SCANCODE_0 : SDL_SCANCODE_1 + i] && p.sel != i) { p.sel = i; AU.play(SND_UI, 0.5f); } }
+    if (d->id == -1 && d->digit >= 0) { if (d->digit < NBUILD && p.sel != d->digit) { p.sel = d->digit; AU.play(SND_UI, 0.5f); } d->digit = -1; }
+    if (barSlot >= 0 && d->clickPend) { if (p.sel != barSlot) { p.sel = barSlot; AU.play(SND_UI, 0.5f); } d->pend[B_A] = false; } // clicking the build bar picks, never builds
     bool own = p.hover >= 0 && G.st[p.hover].team == p.team;
     if (pr(*d, B_A)) { if (own) toast(p, "SPACE TAKEN - MOVE OFF THE STRUCTURE"), AU.play(SND_ERR, 0.4f); else tryBuild(p, BUILDS[p.sel], p.cur, false); }
     if (pr(*d, B_X)) { if (own) tryUpgrade(p, p.hover, false); else { toast(p, "POINT AT A STRUCTURE TO UPGRADE"); AU.play(SND_ERR, 0.4f); } }
@@ -179,6 +223,8 @@ static void drawLogo(Canvas& cv, float cx, float y, float size) {
     FONT.draw(cv, "MINE  -  POWER  -  DEFEND", V2(cx, y + size * 1.35f), size * 0.24f, withA(C_MIN, 0.9f), 1);
 }
 static void menuList(Canvas& cv, const char** items, int n, int sel, float cx, float y, float size, float gap) {
+    MH.n = std::min(n, 12); MH.frame = G.frame; MH.cx = cx; MH.y = y; MH.size = size; MH.gap = gap;
+    for (int i = 0; i < MH.n; i++) MH.w[i] = Font::width(items[i], size);
     for (int i = 0; i < n; i++) {
         bool s = i == sel; Col c = s ? PCOL[0] : withA(C_WHITE, 0.6f);
         FONT.draw(cv, items[i], V2(cx, y + i * gap), size, c, 1, 0, s ? 1.0f : 0.3f);
@@ -201,15 +247,17 @@ static void updateMenus(float dt) {
     switch (G.state) {
     case ST_TITLE: {
         if (m.y) { G.menuSel = (G.menuSel + m.y + NTITLE) % NTITLE; AU.play(SND_UI, 0.6f); }
+        { bool c; menuMouse(G.menuSel, c); if (c) m.a = true; }
         if (m.a || m.start) {
             AU.play(SND_UI_OK, 0.7f);
             if (G.menuSel == 0) enterLobby(); else if (G.menuSel == 1) { G.state = ST_HELP; G.stateT = 0; } else if (G.menuSel == 2) { G.state = ST_OPTIONS; G.menuSel = 0; } else G.quit = true;
         }
         break;
     }
-    case ST_HELP: if (m.a || m.b || m.start) { G.state = ST_TITLE; G.menuSel = 1; AU.play(SND_UI, 0.6f); } break;
+    case ST_HELP: if (m.a || m.b || m.start || (kbd() && kbd()->clickPend)) { G.state = ST_TITLE; G.menuSel = 1; AU.play(SND_UI, 0.6f); } break;
     case ST_OPTIONS: {
         if (m.y) { G.menuSel = (G.menuSel + m.y + 6) % 6; AU.play(SND_UI, 0.6f); }
+        { bool c; menuMouse(G.menuSel, c); if (c) m.a = true; }
         int dx = m.x + (m.a ? 1 : 0);
         if (dx) {
             AU.play(SND_UI, 0.6f);
@@ -239,6 +287,12 @@ static void updateMenus(float dt) {
                 if (pr(d, B_START)) startNow = true;
             } else if (pr(d, B_B) && joinedCount() == 0) { G.state = ST_TITLE; G.menuSel = 0; AU.play(SND_UI, 0.6f); }
         }
+        if (Dev* k = kbd()) if (k->clickPend && LB.frame >= G.frame - 2) {
+            bool kbJoined = false; for (auto& p : G.pl) if (p.joined && !p.cpu && p.dev == -1) kbJoined = true;
+            if (mouseIn(LB.mx, LB.my, LB.mw, LB.mh)) { G.mode = (G.mode + (k->mouse.x < LB.mx + LB.mw / 2 ? MODE_N - 1 : 1)) % MODE_N; AU.play(SND_UI, 0.6f); }
+            else if (mouseIn(LB.sx, LB.sy, LB.sw, LB.sh)) { if (!kbJoined && joinedCount() < 4) joinPlayer(-1, false); startNow = true; }
+            else if (!kbJoined && joinedCount() < 4) joinPlayer(-1, false);
+        }
         bool anyHuman = false; for (auto& p : G.pl) if (p.joined && !p.cpu) anyHuman = true;
         if (startNow && anyHuman) {
             if (rivals() && joinedCount() < 2) joinPlayer(-9, true);
@@ -250,6 +304,13 @@ static void updateMenus(float dt) {
     }
     case ST_MISSIONS: {
         if (m.y) { G.menuSel = (G.menuSel + m.y + NMISSIONS) % NMISSIONS; AU.play(SND_UI, 0.6f); }
+        if (Dev* k = kbd()) { // mission rows (same layout as the drawing)
+            float u = G.H / 1080.f, y0 = 190 * u, rh = 92 * u, w = 1100 * u;
+            for (int i = 0; i < NMISSIONS; i++) if (mouseIn(G.W * 0.5f - w / 2, y0 + i * rh - 12 * u, w, rh - 10 * u)) {
+                if (k->mouseMoved && G.menuSel != i) { G.menuSel = i; AU.play(SND_UI, 0.4f); }
+                if (k->clickPend) { G.menuSel = i; m.a = true; }
+            }
+        }
         if (m.a || m.start) { G.mission = G.menuSel; AU.play(SND_UI_OK, 0.8f); startGame(); }
         if (m.b) { enterLobby(); AU.play(SND_UI, 0.6f); }
         break;
@@ -287,7 +348,7 @@ static void renderMenus(Canvas& cv) {
             "STICK - MOVE CURSOR      LB / RB - CHOOSE STRUCTURE",
             "A - BUILD     X - UPGRADE     HOLD Y - RECYCLE     B - PING",
             "TRIGGERS OR RIGHT STICK - ZOOM     BACK - BIG MAP     START - PAUSE",
-            "KEYBOARD: WASD, SPACE, U, R, Q/E, 1-0, MOUSE, ESC",
+            "KEYBOARD: MOUSE POINTS, WASD SCROLLS, CLICK/SPACE, U, R, Q/E, 1-0, ESC",
         };
         int n = sizeof(lines) / sizeof(lines[0]);
         drawPanel(cv, cx - 760 * u, 140 * u, 1520 * u, (n * 46 + 40) * u, withA(PCOL[0], 0.5f), u);
@@ -336,9 +397,15 @@ static void renderMenus(Canvas& cv) {
         float my = y0 + ph + 70 * u;
         char ml[64]; snprintf(ml, sizeof ml, "<  %s  >", MODENAMES[G.mode]);
         FONT.draw(cv, ml, V2(cx, my), 34 * u, PCOL[0], 1, 0, 1.0f);
+        { float mw = Font::width(ml, 34 * u) + 40 * u; LB.mx = cx - mw / 2; LB.my = my - 14 * u; LB.mw = mw; LB.mh = 70 * u; LB.frame = G.frame; }
+        { bool any = false; for (auto& p : G.pl) if (p.joined && !p.cpu) any = true;
+          float bw = 260 * u, bh = 64 * u, bx = cx - bw / 2, by = my + 130 * u; LB.sx = bx; LB.sy = by; LB.sw = bw; LB.sh = bh;
+          bool hot = mouseIn(bx, by, bw, bh);
+          drawPanel(cv, bx, by, bw, bh, any ? (hot ? C_WHITE : PCOL[0]) : withA(C_DIM, 0.5f), u);
+          FONT.draw(cv, any ? "START" : "CLICK TO JOIN", V2(cx, by + 20 * u), (any ? 26 : 18) * u, any ? (hot ? C_WHITE : PCOL[0]) : withA(C_WHITE, 0.6f), 1, 0, any ? 1.0f : 0.3f); }
         const char* md = G.mode == MODE_COOP ? "SHARE ONE BASE AND ONE STOCKPILE. PLAY THE MISSIONS." : G.mode == MODE_ENDLESS ? "SHARE ONE BASE. THE WAVES NEVER STOP." : G.mode == MODE_VERSUS ? "EVERYONE BUILDS THEIR OWN BASE. TURRETS FIRE ON RIVALS TOO." : "NO ALIENS. YOUR FRIENDS ARE THE RIVALS. FIND THEIR BASES AND SEND CARRIER FIGHTERS.";
         FONT.draw(cv, md, V2(cx, my + 56 * u), 18 * u, withA(C_WHITE, 0.85f), 1);
-        if (G.mode == MODE_ENDLESS && G.opt.bestEndless > 0) FONT.draw(cv, ("BEST " + mmss((float)G.opt.bestEndless)).c_str(), V2(cx, my + 90 * u), 16 * u, C_MIN, 1);
+        if (G.mode == MODE_ENDLESS && G.opt.bestEndless > 0) FONT.draw(cv, ("BEST " + mmss((float)G.opt.bestEndless)).c_str(), V2(cx, my + 92 * u), 16 * u, C_MIN, 1);
         FONT.draw(cv, "A JOIN    B LEAVE    LEFT/RIGHT MODE    X ADD CPU    Y REMOVE CPU    START BEGIN", V2(cx, G.H - 70 * u), 16 * u, withA(C_DIM, 0.95f), 1);
         break;
     }
@@ -368,6 +435,7 @@ static void updateOverlay(float dt) {
         bool canNext = G.mode == MODE_COOP && G.result == 1 && G.mission + 1 < NMISSIONS;
         int n = canNext ? 3 : 2;
         if (m.y) { G.resultSel = (G.resultSel + m.y + n) % n; AU.play(SND_UI, 0.6f); }
+        { bool c; menuMouse(G.resultSel, c); if (c) m.a = true; }
         if (m.a || m.start) {
             AU.play(SND_UI_OK, 0.7f);
             int opt = canNext ? G.resultSel : (G.resultSel == 0 ? 0 : 2);
@@ -377,6 +445,7 @@ static void updateOverlay(float dt) {
     }
     if (G.paused) {
         if (m.y) { G.pauseSel = (G.pauseSel + m.y + 3) % 3; AU.play(SND_UI, 0.6f); }
+        { bool c; menuMouse(G.pauseSel, c); if (c) m.a = true; }
         if (m.b || (m.start && G.pauseSel == 0)) { G.paused = false; AU.play(SND_UI, 0.6f); return; }
         if (m.a || m.start) {
             AU.play(SND_UI_OK, 0.7f);
@@ -522,8 +591,9 @@ static bool frame() {
             case SDL_CONTROLLERDEVICEADDED: openPad(e.cdevice.which); break;
             case SDL_CONTROLLERDEVICEREMOVED: closePad(e.cdevice.which); break;
             case SDL_CONTROLLERBUTTONDOWN: { Dev* p = devById(e.cbutton.which); int b = padButton(e.cbutton.button); if (p && b >= 0) p->hit[b] = true; break; }
-            case SDL_MOUSEBUTTONDOWN: { Dev* k = devById(-1); if (k) { if (e.button.button == SDL_BUTTON_LEFT) k->hit[B_A] = true; else if (e.button.button == SDL_BUTTON_RIGHT) k->hit[B_B] = true; } break; }
+            case SDL_MOUSEBUTTONDOWN: { Dev* k = devById(-1); if (k) { if (e.button.button == SDL_BUTTON_LEFT) k->click = true; else if (e.button.button == SDL_BUTTON_RIGHT) k->hit[B_B] = true; } break; }
             case SDL_MOUSEMOTION: { Dev* k = devById(-1); if (k) k->mouseMoved = true; break; }
+            case SDL_KEYDOWN: { Dev* k = devById(-1); if (k && !e.key.repeat) keyHit(*k, e.key.keysym.scancode, G.state == ST_GAME && !G.paused && !G.result); break; }
             case SDL_MOUSEWHEEL: { Dev* k = devById(-1); if (k) k->wheel += (float)e.wheel.y; break; }
             case SDL_WINDOWEVENT: if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) { setupTarget(); if (G.state == ST_GAME) layoutViews(); } break;
             }
@@ -562,6 +632,8 @@ static bool frame() {
         static int benchN = getenv("BC_FRAMES") ? atoi(getenv("BC_FRAMES")) : 0; static Uint64 benchT0 = 0;
         if (benchN && G.frame == 10) benchT0 = SDL_GetPerformanceCounter();
         if (benchN && G.frame == 10 + benchN) { double s = (double)(SDL_GetPerformanceCounter() - benchT0) / SDL_GetPerformanceFrequency(); printf("bench: %d frames in %.2fs = %.1f fps\n", benchN, s, benchN / s); G.quit = true; }
+        { static int shown = -1; int want = !(G.state == ST_GAME && !G.paused && !G.result) && G.state != ST_ICON && G.state != ST_LOGO;
+          if (want != shown) { SDL_ShowCursor(want ? SDL_ENABLE : SDL_DISABLE); shown = want; } }
         bool shot = G.shotFrame >= 0 && G.frame == G.shotFrame;
         renderFrame(shot);
         if (shot) return false;
@@ -598,7 +670,6 @@ int main(int argc, char** argv) {
     if (!G.ren) G.ren = SDL_CreateRenderer(G.win, -1, SDL_RENDERER_TARGETTEXTURE);
     if (!G.ren) { printf("renderer failed: %s\n", SDL_GetError()); return 1; }
     SDL_RendererInfo ri; SDL_GetRendererInfo(G.ren, &ri); printf("renderer: %s\n", ri.name);
-    SDL_ShowCursor(SDL_DISABLE);
     setupTarget();
     if (!getenv("BC_MUTE")) AU.open();
     applyAudioVol();

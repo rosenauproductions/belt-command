@@ -112,6 +112,8 @@ struct Dev {
     bool pend[NB] = {}; // presses waiting to be used; kept until a game step (or menu update) uses them
     V2 mv; float tl = 0, tr = 0; int navX = 0, navY = 0, nxLast = 0, nyLast = 0; float nxT = 0, nyT = 0;
     bool ml = false, mr = false, mouseMoved = false; V2 mouse; float wheel = 0;
+    int digit = -1; // number key pressed since the last game step (keyboard)
+    bool click = false, clickPend = false; // left mouse click (from events), kept apart from Space/Enter so menus can tell them apart
 };
 struct Player {
     bool joined = false, cpu = false, view = false; int dev = -9; int team = 0, idx = 0; Col col;

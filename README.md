@@ -100,7 +100,7 @@ The launcher logs to `/userdata/system/logs/beltcommand.log`. Settings are saved
 
 Lobby: A joins each controller, left/right picks the mode, X/Y add or remove CPU players, Start begins. Buttons are positional, so Switch Pro-style pads work the same way and show Nintendo letters on screen.
 
-Keyboard: WASD or mouse to move, Space or left-click to build, Q/E or 1-9, 0 to choose, U upgrade, hold R recycle, Backspace or right-click ping, wheel or -/= zoom, Tab map, Esc pause.
+Keyboard + mouse: the mouse points (no edge scrolling), WASD or arrows scroll the map, Space or left-click to build, click a build icon to choose it, Q/E or 1-9, 0 to choose, U upgrade, hold R recycle, Backspace or right-click ping, wheel or -/= zoom, Tab map, Esc pause.
 
 ## Testing without a screen
 
