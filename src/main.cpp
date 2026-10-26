@@ -104,7 +104,10 @@ struct Team {
 enum { B_A, B_B, B_X, B_Y, B_LB, B_RB, B_START, B_BACK, B_UP, B_DOWN, B_LEFT, B_RIGHT, NB };
 struct Dev {
     int id = -1; SDL_GameController* gc = nullptr; std::string name; bool nintendo = false;
-    bool b[NB] = {}, pb[NB] = {}; V2 mv; float tl = 0, tr = 0; int navX = 0, navY = 0, nxLast = 0, nyLast = 0; float nxT = 0, nyT = 0;
+    bool b[NB] = {}, pb[NB] = {};
+    bool hit[NB] = {};  // pressed since the last read (from SDL events, so quick taps are never missed)
+    bool pend[NB] = {}; // presses waiting to be used; kept until a game step (or menu update) uses them
+    V2 mv; float tl = 0, tr = 0; int navX = 0, navY = 0, nxLast = 0, nyLast = 0; float nxT = 0, nyT = 0;
     bool ml = false, mr = false, mouseMoved = false; V2 mouse; float wheel = 0;
 };
 struct Player {

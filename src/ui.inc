@@ -1,7 +1,19 @@
 // Belt Command - input, menus, main loop (included from main.cpp)
 
+static int PADTEST_HITS = 0; // BC_PADTEST: how many RB presses the game acted on
 static Dev* devById(int id) { for (auto& d : G.devs) if (d.id == id) return &d; return nullptr; }
-static bool pr(const Dev& d, int b) { return d.b[b] && !d.pb[b]; }
+// a press counts exactly once: latched until the next game step or menu update uses it
+static bool pr(const Dev& d, int b) { return d.pend[b]; }
+static void usePresses() { for (auto& d : G.devs) memset(d.pend, 0, sizeof d.pend); }
+static int padButton(int sdlButton) {
+    switch (sdlButton) {
+    case SDL_CONTROLLER_BUTTON_A: return B_A; case SDL_CONTROLLER_BUTTON_B: return B_B; case SDL_CONTROLLER_BUTTON_X: return B_X; case SDL_CONTROLLER_BUTTON_Y: return B_Y;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return B_LB; case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return B_RB;
+    case SDL_CONTROLLER_BUTTON_START: return B_START; case SDL_CONTROLLER_BUTTON_BACK: return B_BACK;
+    case SDL_CONTROLLER_BUTTON_DPAD_UP: return B_UP; case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return B_DOWN; case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return B_LEFT; case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return B_RIGHT;
+    }
+    return -1;
+}
 
 static void openPad(int index) {
     if (!SDL_IsGameController(index)) { printf("pad: joystick %d is not a game controller (%s)\n", index, SDL_JoystickNameForIndex(index)); return; }
@@ -75,6 +87,11 @@ static void readDevs(float dt, bool inGame) {
             float ry = SDL_GameControllerGetAxis(d.gc, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.f;
             if (ry > 0.4f) d.tr = std::max(d.tr, (ry - 0.4f) / 0.6f); else if (ry < -0.4f) d.tl = std::max(d.tl, (-ry - 0.4f) / 0.6f);
         }
+        for (int k = 0; k < NB; k++) {
+            if (d.hit[k]) d.b[k] = true; // a tap that went down and up between reads still counts as held this frame
+            if ((d.b[k] && !d.pb[k]) || d.hit[k]) d.pend[k] = true;
+            d.hit[k] = false;
+        }
         d.navX = navAxis(d, 0, dt); d.navY = navAxis(d, 1, dt);
     }
 }
@@ -124,7 +141,7 @@ static void updatePlayer(Player& p, float dt) {
     p.bigMap = d->b[B_BACK];
     if (!T.alive) return;
     if (pr(*d, B_LB)) { p.sel = (p.sel + NBUILD - 1) % NBUILD; AU.play(SND_UI, 0.5f); }
-    if (pr(*d, B_RB)) { p.sel = (p.sel + 1) % NBUILD; AU.play(SND_UI, 0.5f); }
+    if (pr(*d, B_RB)) { p.sel = (p.sel + 1) % NBUILD; AU.play(SND_UI, 0.5f); PADTEST_HITS++; }
     if (d->id == -1) { const Uint8* k = SDL_GetKeyboardState(nullptr); for (int i = 0; i < NBUILD; i++) if (k[i == 9 ? SDL_SCANCODE_0 : SDL_SCANCODE_1 + i] && p.sel != i) { p.sel = i; AU.play(SND_UI, 0.5f); } }
     bool own = p.hover >= 0 && G.st[p.hover].team == p.team;
     if (pr(*d, B_A)) { if (own) toast(p, "SPACE TAKEN - MOVE OFF THE STRUCTURE"), AU.play(SND_ERR, 0.4f); else tryBuild(p, BUILDS[p.sel], p.cur, false); }
@@ -520,6 +537,8 @@ int main(int argc, char** argv) {
             case SDL_QUIT: G.quit = true; break;
             case SDL_CONTROLLERDEVICEADDED: openPad(e.cdevice.which); break;
             case SDL_CONTROLLERDEVICEREMOVED: closePad(e.cdevice.which); break;
+            case SDL_CONTROLLERBUTTONDOWN: { Dev* p = devById(e.cbutton.which); int b = padButton(e.cbutton.button); if (p && b >= 0) p->hit[b] = true; break; }
+            case SDL_MOUSEBUTTONDOWN: { Dev* k = devById(-1); if (k) { if (e.button.button == SDL_BUTTON_LEFT) k->hit[B_A] = true; else if (e.button.button == SDL_BUTTON_RIGHT) k->hit[B_B] = true; } break; }
             case SDL_MOUSEMOTION: { Dev* k = devById(-1); if (k) k->mouseMoved = true; break; }
             case SDL_MOUSEWHEEL: { Dev* k = devById(-1); if (k) k->wheel += (float)e.wheel.y; break; }
             case SDL_WINDOWEVENT: if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) { setupTarget(); if (G.state == ST_GAME) layoutViews(); } break;
@@ -527,23 +546,34 @@ int main(int argc, char** argv) {
         }
         Uint64 now = SDL_GetPerformanceCounter(); double dt = (double)(now - last) / SDL_GetPerformanceFrequency(); last = now;
         if (G.shotFrame >= 0) dt = 1 / 60.0;
+        // BC_PADTEST=N: plug in a virtual pad, give it to P1 and tap RB N times (down one frame, up the next),
+        // with BC_DT=seconds per frame (e.g. 0.00694 = 144 Hz). Prints how many taps the game acted on.
+        static int padTest = getenv("BC_PADTEST") ? atoi(getenv("BC_PADTEST")) : 0;
+        if (getenv("BC_DT")) dt = atof(getenv("BC_DT"));
+        if (padTest && G.state == ST_GAME) {
+            static SDL_Joystick* vj = nullptr; static int sent = 0, ph = 0, wait = 0;
+            if (!vj) { int vi = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, 6, SDL_CONTROLLER_BUTTON_MAX, 0); vj = SDL_JoystickOpen(vi); wait = 30; printf("padtest: virtual pad index %d %s\n", vi, vj ? "open" : SDL_GetError()); }
+            else if (wait > 0) { if (--wait == 0) { for (auto& d : G.devs) if (d.gc) G.pl[0].dev = d.id; G.pl[0].cpu = false; printf("padtest: P1 uses pad %d\n", G.pl[0].dev); } }
+            else if (sent < padTest) { if (ph == 0) { SDL_JoystickSetVirtualButton(vj, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 1); sent++; } else if (ph == 1) SDL_JoystickSetVirtualButton(vj, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 0); ph = (ph + 1) % 3; }
+            else if (ph++ > 20) { printf("padtest: sent %d taps, game used %d\n", sent, PADTEST_HITS); G.quit = true; }
+        }
         if (dt > 0.1) dt = 0.1;
         fpsT += (float)dt; fpsN++; if (fpsT > 30) { printf("fps: %.1f (enemies %d, structures %d, particles %d)\n", fpsN / fpsT, (int)G.en.size(), (int)G.st.size(), (int)G.parts.size()); fpsT = 0; fpsN = 0; }
         readDevs((float)dt, G.state == ST_GAME && !G.paused && !G.result);
         // BACK + START anywhere returns to the title (Batocera's HOTKEY + START exits the game)
         for (auto& d : G.devs) if (d.id != -1 && d.b[B_BACK] && d.b[B_START] && (pr(d, B_START) || pr(d, B_BACK))) { if (G.state == ST_GAME) { G.state = ST_TITLE; G.menuSel = 0; G.paused = false; } }
         if (G.state == ST_GAME) {
-            if (G.paused || G.result) updateOverlay((float)dt);
+            if (G.paused || G.result) { updateOverlay((float)dt); usePresses(); }
+            if (!G.paused && !G.result) for (auto& p : G.pl) if (p.joined && !p.cpu && !p.devLost) { Dev* d = devById(p.dev); if (d && pr(*d, B_START) && !d->b[B_BACK]) { G.paused = true; G.pauseSel = 0; G.pauser = p.idx; AU.play(SND_UI_OK, 0.6f); usePresses(); break; } }
             if (!G.paused) {
                 acc += dt;
                 while (acc >= 1 / 60.0) {
                     acc -= 1 / 60.0;
-                    if (!G.result) for (auto& p : G.pl) if (p.joined) updatePlayer(p, 1 / 60.f);
+                    if (!G.result) { for (auto& p : G.pl) if (p.joined) updatePlayer(p, 1 / 60.f); usePresses(); } // presses wait for a step, and fire once
                     stepWorld(1 / 60.f);
                 }
-                if (!G.result) for (auto& p : G.pl) if (p.joined && !p.cpu && !p.devLost) { Dev* d = devById(p.dev); if (d && pr(*d, B_START) && !d->b[B_BACK]) { G.paused = true; G.pauseSel = 0; G.pauser = p.idx; AU.play(SND_UI_OK, 0.6f); break; } }
             }
-        } else { G.stateT += 0; updateMenus((float)dt); }
+        } else { updateMenus((float)dt); usePresses(); }
         G.frame++;
         static int benchN = getenv("BC_FRAMES") ? atoi(getenv("BC_FRAMES")) : 0; static Uint64 benchT0 = 0;
         if (benchN && G.frame == 10) benchT0 = SDL_GetPerformanceCounter();

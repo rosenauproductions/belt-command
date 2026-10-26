@@ -101,6 +101,7 @@ Run under `xvfb-run` with these environment variables:
 | `BC_BOTS=1` | CPU drives the human seats too |
 | `BC_ADVANCE=secs` | Simulate this many seconds before the first frame |
 | `BC_SEED=n` | Fixed world seed |
+| `BC_PADTEST=n`, `BC_DT=secs` | Plug in a virtual pad, tap RB n times at a fixed frame time, print how many taps the game used (input regression test) |
 | `BC_CAMFIGHT=1`, `BC_ZOOM=z` | After `BC_ADVANCE`, point the views at a fighter raid on that player, and set the zoom |
 | `BC_SHOT=frame`, `BC_SHOT_PATH=file.bmp` | Save a screenshot and exit |
 | `BC_FRAMES=n` | Print a frame-rate benchmark and exit |
@@ -109,6 +110,8 @@ Run under `xvfb-run` with these environment variables:
 Example: `BC_MUTE=1 SDL_AUDIODRIVER=dummy BC_WINDOW=1920x1080 BC_STATE=game BC_MODE=endless BC_BOTS=1 BC_PLAYERS=4 BC_ADVANCE=300 BC_SHOT=10 BC_SHOT_PATH=shot.bmp xvfb-run -a -s "-screen 0 1920x1080x24" build/bc_test`
 
 ## Status
+
+- 26 Oct 2026: fixed pad buttons that often did not register. Presses were read once per drawn frame but used by the 60 Hz game step, so a press on a frame with no game step was dropped (and on slow frames one press counted twice or three times). Presses are now caught from SDL events, held until a game step uses them, and used exactly once. Virtual-pad test, 200 taps: old code 77 used at 144 fps and 600 at 20 fps; new code 200 at every frame rate.
 
 - 25 Oct 2026: added the Carrier, Research (crystal) and the Raid mode, plus glowing mining beams and flow-based link glow. Bot soak: raid games with 2-4 CPUs mostly end in 13-19 minutes (a few evenly matched 2- and 4-CPU games ran past 50); the alien modes play about as before. Not yet tried by people.
 
