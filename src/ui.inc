@@ -340,8 +340,7 @@ static void renderMenus(Canvas& cv) {
             "MINERALS PAY FOR BUILDING, UPGRADES AND MISSILES.",
             "LASERS BURN ENERGY. MISSILES BURN MINERALS. PLAN FOR BOTH.",
             "ALIENS ATTACK IN WAVES FROM THE EDGE. RED MARKERS WARN YOU.",
-            "EVERY STRUCTURE LINKS TO ALL IN REACH. LOAD SPREADS OVER THE PATHS.",
-            "RED LINKS ARE OVERLOADED: ADD PATHS OR UPGRADE RELAYS.",
+            "IF A LINK BREAKS, EVERYTHING PAST IT GOES DARK.",
             "CARRIERS BUILD FIGHTERS. THEY GUARD YOUR BASE AND RAID RIVALS.",
             "RESEARCH FINDS CRYSTAL: EVERY ASTEROID REFILLS AND IT IS WORTH 1.5X.",
             "RAID: NO ALIENS. RIVAL BASES STAY HIDDEN UNTIL YOU GET CLOSE.",
@@ -353,7 +352,7 @@ static void renderMenus(Canvas& cv) {
         };
         int n = sizeof(lines) / sizeof(lines[0]);
         drawPanel(cv, cx - 760 * u, 140 * u, 1520 * u, (n * 46 + 40) * u, withA(PCOL[0], 0.5f), u);
-        for (int i = 0; i < n; i++) FONT.draw(cv, lines[i], V2(cx, 170 * u + i * 46 * u), 20 * u, i >= 14 ? withA(C_MIN, 0.95f) : withA(C_WHITE, 0.9f), 1);
+        for (int i = 0; i < n; i++) FONT.draw(cv, lines[i], V2(cx, 170 * u + i * 46 * u), 20 * u, i >= 13 ? withA(C_MIN, 0.95f) : withA(C_WHITE, 0.9f), 1);
         FONT.draw(cv, "PRESS A TO GO BACK", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.9f), 1);
         break;
     }
@@ -569,10 +568,7 @@ static void testSetup() {
         if (getenv("BC_CAMFIGHT")) for (auto& q : G.pl) if (q.joined) { float bd = 1e18f; for (auto& f : G.fi) if (!f.dead && f.tk == 3 && f.team != q.team && G.st[f.tid].team == q.team) { float d = dist2(f.p, q.cam); if (d < bd) { bd = d; q.cam = f.p; } } q.cur = q.cam; }
         if (getenv("BC_ZOOM")) for (auto& q : G.pl) if (q.joined) q.zoom = (float)atof(getenv("BC_ZOOM"));
         printf("test: advanced %.0fs: structs %d enemies %d waves %d minerals %.0f mined %.0f result %d\n", secs, (int)G.st.size(), (int)G.en.size(), G.waveN, G.teams[0].minerals, G.teams[0].mined, G.result);
-        for (int t = 0; t < G.nTeams; t++) { int alive = 0; for (auto& q : G.st) if (!q.dead && q.team == t) alive++; { int thr = 0, conn = 0; float worst = 1, maxOver = 0; for (auto& q : G.st) if (!q.dead && q.team == t && q.connected) { conn++; if (q.supply < 0.97f) thr++; worst = std::min(worst, q.supply); }
-          Team& TT = G.teams[t]; for (size_t j = 0; j < TT.links.size(); j++) maxOver = std::max(maxOver, TT.linkFlow[j] / linkCap(G.st[TT.links[j].first], G.st[TT.links[j].second]));
-          printf("test: team %d net: links %d structs %d throttled %d worst supply %.2f max link load %.2f\n", t, (int)TT.links.size(), conn, thr, worst, maxOver); }
-        { int nf = 0; for (auto& f : G.fi) if (f.team == t) nf++; printf("test: team %d alive structs %d mined %.0f kills %d alive %d fighters %d lost %d found %u\n", t, alive, G.teams[t].mined, G.teams[t].kills, G.teams[t].alive, nf, G.teams[t].ftrLost, G.teams[t].found); } }
+        for (int t = 0; t < G.nTeams; t++) { int alive = 0; for (auto& q : G.st) if (!q.dead && q.team == t) alive++; { int nf = 0; for (auto& f : G.fi) if (f.team == t) nf++; printf("test: team %d alive structs %d mined %.0f kills %d alive %d fighters %d lost %d found %u\n", t, alive, G.teams[t].mined, G.teams[t].kills, G.teams[t].alive, nf, G.teams[t].ftrLost, G.teams[t].found); } }
     }
 }
 

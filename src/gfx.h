@@ -97,8 +97,8 @@ struct Canvas {
         if (!seg) seg = segsFor(r);
         for (int i = 0; i < seg; i++) tri(fillV, c, c + fromAng(i * 2 * PI / seg) * r, c + fromAng((i + 1) * 2 * PI / seg) * r, col, col, col);
     }
-    void glowDisc(V2 c, float r, Col center, int seg = 0) {   // additive radial blob
-        if (!seg) seg = std::max(12, segsFor(r) / 2); Col z = withA(center, 0);
+    void glowDisc(V2 c, float r, Col center) {   // additive radial blob
+        int seg = std::max(12, segsFor(r) / 2); Col z = withA(center, 0);
         for (int i = 0; i < seg; i++) tri(addV, c, c + fromAng(i * 2 * PI / seg) * r, c + fromAng((i + 1) * 2 * PI / seg) * r, center, z, z);
     }
     void rect(float x, float y, float w, float h, Col c) { quad(fillV, V2(x, y), V2(x + w, y), V2(x + w, y + h), V2(x, y + h), c, c, c, c); }

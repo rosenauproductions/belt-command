@@ -226,29 +226,24 @@ static void drawWorld(Canvas& cv, const View& v, const Player* me) {
         cv.glowDisc(v.w2s(s.p), R0 * k, withA(tc, 0.05f + 0.05f * fr));
     }
     // network links with energy pulses
-    static bool noLinks = getenv("BC_NOLINKS") != nullptr; // profiling switch
-    for (int t = 0; t < 4 && !noLinks; t++) {
+    for (int t = 0; t < 4; t++) {
         Team& T = G.teams[t]; if (!T.used || !seen(vt, t)) continue;
         for (size_t i = 0; i < T.links.size(); i++) {
             const Struct& a = G.st[T.links[i].first]; const Struct& b = G.st[T.links[i].second]; if (a.dead || b.dead) continue;
             if (!v.vis((a.p + b.p) * 0.5f, dist(a.p, b.p) * 0.5f + 20)) continue;
             V2 d = norm(b.p - a.p); V2 pa = v.w2s(a.p + d * (a.r() + 3)), pb = v.w2s(b.p - d * (b.r() + 3));
             bool live = a.powered && b.built >= 1 && T.alive;
-            // busier links glow brighter, thicker and pulse faster; past ~80% of capacity they turn orange, then flashing red
+            // busier links glow brighter, thicker and pulse faster
             float fl = i < T.linkFlow.size() ? T.linkFlow[i] : 0, f = live ? fl / (fl + 14) : 0;
-            float over = live ? fl / linkCap(a, b) : 0;
-            Col hot = over > 1 ? mixc(Col(255, 150, 40), C_BAD, clampf((over - 1) * 2, 0, 1) * (0.6f + 0.4f * std::sin(G.time * 14))) : Col(255, 170, 60);
-            Col base = over > 0.8f ? mixc(T.col, hot, clampf((over - 0.8f) * 3, 0, 1)) : T.col;
-            Col lcol = live ? mixc(base, C_WHITE, 0.35f * f) : C_DIM;
+            Col lcol = live ? mixc(T.col, C_WHITE, 0.35f * f) : C_DIM;
+            if (live && f > 0.05f) cv.line(pa, pb, std::max(1.f, (2.5f + 6 * f) * k), withA(T.col, 0.06f + 0.16f * f), 0.3f + 1.2f * f);
+            cv.line(pa, pb, std::max(0.8f, (1.0f + 1.6f * f) * k), withA(lcol, live ? 0.38f + 0.5f * f : 0.25f), 0.4f + 1.3f * f);
             if (b.built < 1 && a.powered) { float ph = std::fmod(G.time * 1.8f, 1.f); cv.glowDisc(pa + (pb - pa) * ph, 4 * k, withA(T.col, 0.8f)); }
-            if (!live || (f < 0.15f && over < 0.8f)) { cv.line(pa, pb, std::max(0.7f, (0.9f + 2 * f) * k), withA(lcol, live ? 0.3f + f : 0.2f), 0); continue; } // quiet: no glow (a web has many links)
-            if (f > 0.2f || over > 0.8f) cv.line(pa, pb, std::max(1.f, (2.5f + 6 * f) * k), withA(base, 0.06f + 0.16f * f), 0.3f + 1.2f * f); // halo only on busy links
-            cv.line(pa, pb, std::max(0.8f, (1.0f + 1.6f * f) * k), withA(lcol, 0.38f + 0.5f * f), f > 0.3f || over > 0.8f ? 0.4f + 1.3f * f : 0);
-            if (T.eprod > 0) {
-                float L = dist(a.p, b.p); int np = 1 + (f > 0.45f) + (f > 0.75f);
+            else if (live && T.eprod > 0) {
+                float L = dist(a.p, b.p); int np = 1 + (int)(f * 3);
                 for (int q = 0; q < np; q++) {
                     float ph = std::fmod(G.time * (90 + 260 * f) / std::max(L, 40.f) + (hash3(T.links[i].second, 0, 1) & 255) / 255.f + q / (float)np, 1.f);
-                    cv.glowDisc(pa + (pb - pa) * ph, (3.0f + 3.5f * f) * k, withA(mixc(base, C_WHITE, 0.4f), T.energy > 2 ? 0.55f + 0.4f * f : 0.3f), 8);
+                    cv.glowDisc(pa + (pb - pa) * ph, (3.0f + 3.5f * f) * k, withA(mixc(T.col, C_WHITE, 0.4f), T.energy > 2 ? 0.55f + 0.4f * f : 0.3f));
                 }
             }
         }
@@ -467,7 +462,6 @@ static void drawHud(Canvas& cv, Player& p) {
         snprintf(buf, sizeof buf, "HP %d/%d", (int)s.hp, (int)s.maxhp); FONT.draw(cv, buf, V2(px + 12 * u, py + 36 * u), 12 * u, C_WHITE);
         if (s.t == S_CARRIER && s.built >= 1) { int fl = 0; for (auto& f : G.fi) if (f.home == p.hover) fl++; snprintf(buf, sizeof buf, "FIGHTERS %d/%d", fl, carrierCap(s.lv)); FONT.draw(cv, buf, V2(px + pw * 0.5f, py + 36 * u), 12 * u, withA(C_WHITE, 0.85f), 1); }
         const char* stt = s.built < 1 ? (s.connected ? "BUILDING" : "NOT CONNECTED") : !s.powered ? "NO POWER" : s.t == S_MINER ? (s.mining ? "MINING" : (s.ast < 0 ? "NO ASTEROID" : "LOW ENERGY")) : s.t == S_SHIELD ? "SHIELD UP" : "ONLINE";
-        if (own && s.built >= 1 && s.powered && s.supply < 0.97f) { snprintf(buf, sizeof buf, "LINKS OVERLOADED  %d%% SPEED", (int)(100 * s.supply)); FONT.draw(cv, buf, V2(px + 12 * u, py + ph + 6 * u), 12 * u, Col(255, 170, 60)); }
         if (s.t == S_RESEARCH && s.built >= 1) { if (G.teams[s.team].crystal) stt = "CRYSTAL FOUND"; else if (s.powered) { snprintf(buf, sizeof buf, "RESEARCH %d%%", (int)(100 * s.charge)); stt = buf; } }
         if (s.t == S_SHIELD && s.powered) { snprintf(buf, sizeof buf, "SHIELD %d%%", (int)(100 * s.charge / (160 * lvm(s.lv)))); stt = buf; }
         FONT.draw(cv, stt, V2(px + pw - 12 * u, py + 36 * u), 12 * u, !s.powered && s.built >= 1 ? C_BAD : C_GOOD, 2);

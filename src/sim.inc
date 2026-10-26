@@ -164,7 +164,7 @@ static void updateStructs(float dt) {
         T.eprod = 0; T.ecap = 0;
         for (auto& s : G.st) if (!s.dead && s.team == t && s.powered) {
             if (s.t == S_HQ) { T.eprod += 3 * lvm(s.lv); T.ecap += 150 * lvm(s.lv); }
-            else if (s.t == S_SOLAR) T.eprod += 2.4f * lvm(s.lv) * s.supply;
+            else if (s.t == S_SOLAR) T.eprod += 2.4f * lvm(s.lv);
             else if (s.t == S_BATTERY) T.ecap += 120 * lvm(s.lv);
         }
         if (!T.alive) T.eprod = 0;
@@ -176,18 +176,18 @@ static void updateStructs(float dt) {
     for (int i = 0; i < (int)G.st.size(); i++) {
         Struct& s = G.st[i]; if (s.dead) continue;
         Team& T = G.teams[s.team]; SPENDER = i;
-        if (s.t == S_SOLAR && s.powered) s.useAcc += 2.4f * lvm(s.lv) * s.supply * dt;
+        if (s.t == S_SOLAR && s.powered) s.useAcc += 2.4f * lvm(s.lv) * dt;
         s.flash = std::max(0.f, s.flash - dt); s.beamT = std::max(0.f, s.beamT - dt); s.cd -= dt; s.spin += dt;
         if (s.doomT > 0) { s.doomT -= dt; if (s.doomT <= 0) { destroyStruct(i); continue; } }
         if (s.built < 1) {
-            if (s.connected && T.alive && spend(T, 1.5f * dt * s.supply)) {
-                s.built += dt * s.supply / SD[s.t].build; s.hp = std::min(s.maxhp, s.hp + s.maxhp * 0.9f * dt * s.supply / SD[s.t].build);
+            if (s.connected && T.alive && spend(T, 1.5f * dt)) {
+                s.built += dt / SD[s.t].build; s.hp = std::min(s.maxhp, s.hp + s.maxhp * 0.9f * dt / SD[s.t].build);
                 if (s.built >= 1) { s.built = 1; T.dirty = true; ring(s.p, s.r(), s.r() + 22, T.col, 0.4f); sfxAt(SND_DONE, s.p, 0.5f, 80); }
             }
             continue;
         }
         if (!s.powered) { s.mining = false; continue; }
-        float m = lvm(s.lv), sup = s.supply; // sup < 1: the links feeding this structure are overloaded
+        float m = lvm(s.lv);
         switch (s.t) {
         case S_MINER: {
             s.chk -= dt;
@@ -196,8 +196,8 @@ static void updateStructs(float dt) {
             if (s.ast >= 0) {
                 Asteroid& a = G.ast[s.ast];
                 s.aim = std::atan2(a.p.y - s.p.y, a.p.x - s.p.x);
-                float rate = 3.5f * m * dt * sup;
-                if (spend(T, 1.6f * m * dt * sup)) {
+                float rate = 3.5f * m * dt;
+                if (spend(T, 1.6f * m * dt)) {
                     bool cry = a.minerals <= 0; float& pool = cry ? a.crystal : a.minerals;
                     float got = std::min(rate, pool); pool -= got; if (cry) got *= CRYSTAL_VALUE;
                     T.minerals += got; T.mined += got; s.mining = true; s.cryBeam = cry; s.useAcc += got; s.spin += dt * 6;
@@ -225,14 +225,14 @@ static void updateStructs(float dt) {
             if (std::fabs(da) > 0.35f || s.cd > 0) break;
             if (s.t == S_LASER) {
                 if (!spend(T, 4)) break;
-                s.cd = 0.5f / sup; s.beamT = 0.1f;
+                s.cd = 0.5f; s.beamT = 0.1f;
                 V2 muzzle = s.p + fromAng(s.aim) * 22;
                 G.beams.push_back({ muzzle, tp, 0.12f, 0.12f, 2.2f, T.col });
                 sparks(tp, 3, T.col, 90); sfxAt(SND_LASER, s.p, 0.35f, 45);
                 if (eIdx >= 0) damageEnemy(G.en[eIdx], 9 * m, s.team); else if (fIdx >= 0) damageFighter(G.fi[fIdx], 9 * m, s.team); else damageStruct(sIdx, 9 * m * 0.7f, s.p, s.team);
             } else {
                 if (T.minerals < 3 || !spend(T, 2)) break;
-                T.minerals -= 3; s.cd = 1.8f / sup; s.beamT = 0.2f;
+                T.minerals -= 3; s.cd = 1.8f; s.beamT = 0.2f;
                 for (int side = -1; side <= 1; side += 2) {
                     Bullet b; b.p = s.p + rotv(V2(16, side * 5.f), s.aim); b.v = fromAng(s.aim + side * 0.25f) * 160; b.dmg = 34 * m * 0.5f; b.life = 4; b.splash = 55; b.team = s.team; b.missile = true;
                     if (eIdx >= 0) b.tgtUid = G.en[eIdx].uid; else if (fIdx >= 0) b.tgtUid = G.fi[fIdx].uid; else b.tgtStruct = sIdx;
@@ -243,7 +243,7 @@ static void updateStructs(float dt) {
             break;
         }
         case S_REPAIR: {
-            if (s.cd > 0) break; s.cd = 0.3f / sup;
+            if (s.cd > 0) break; s.cd = 0.3f;
             float range = rangeOf(S_REPAIR, s.lv); int first = -1;
             for (int pass = 0; pass < 2; pass++) {
                 int bi = -1; float br = 0.999f;
@@ -258,12 +258,12 @@ static void updateStructs(float dt) {
         }
         case S_SHIELD: {
             float cap = 160 * m;
-            if (s.charge < cap) { float want = std::min(cap - s.charge, 15 * m * dt * sup); if (spend(T, want)) s.charge += want; }
+            if (s.charge < cap) { float want = std::min(cap - s.charge, 15 * m * dt); if (spend(T, want)) s.charge += want; }
             break;
         }
         case S_RESEARCH: {
             if (T.crystal) break;
-            if (spend(T, 2.0f * dt * sup)) { s.charge += dt * sup / researchTime(s.lv); s.spin += dt * 3; }
+            if (spend(T, 2.0f * dt)) { s.charge += dt / researchTime(s.lv); s.spin += dt * 3; }
             if (s.charge >= 1) discoverCrystal(s.team);
             break;
         }
@@ -273,7 +273,7 @@ static void updateStructs(float dt) {
             // launch the squadron together once it is full (or right away on an attack order)
             if (rivals() && out == 0 && have > 0 && (have >= carrierCap(s.lv) || T.order >= 0)) for (auto& f : G.fi) if (!f.dead && f.home == i) { f.sortie = true; f.retarget = 0; }
             if (have >= carrierCap(s.lv)) { s.charge = 0; break; }
-            if (s.charge < 1) { if (spend(T, 1.2f * dt * sup)) s.charge = std::min(1.f, s.charge + dt * sup / FTR_BUILD); }
+            if (s.charge < 1) { if (spend(T, 1.2f * dt)) s.charge = std::min(1.f, s.charge + dt / FTR_BUILD); }
             else if (T.minerals >= FTR_COST) {
                 T.minerals -= FTR_COST; s.charge = 0;
                 Fighter f; f.team = s.team; f.uid = G.uidNext++; f.home = i; f.ang = s.aim; f.p = s.p + fromAng(f.ang) * 26; f.v = fromAng(f.ang) * 80;
@@ -285,37 +285,14 @@ static void updateStructs(float dt) {
         }
     }
     SPENDER = -1;
-    // multipath flow: every structure sends what it uses, makes and mines toward Command over all its downhill links,
-    // splitting by each link's spare room (so busy links shed load to parallel ones); then overload -> supply
+    // link flow: each link carries everything used, made and mined past it (links are listed parent before child)
     for (auto& s : G.st) { if (s.dead) continue; s.flow += (s.useAcc / dt - s.flow) * std::min(1.f, dt * 2.5f); s.useAcc = 0; }
-    static std::vector<float> inflow, raw, cong;
+    static std::vector<float> sub;
     for (int t = 0; t < 4; t++) {
-        Team& T = G.teams[t]; if (!T.used || T.links.empty()) continue;
-        inflow.assign(G.st.size(), 0.f); raw.assign(T.links.size(), 0.f); cong.assign(G.st.size(), 0.f);
-        for (int u : T.flowOrder) {
-            if (u == T.hq) continue;
-            Struct& su = G.st[u]; float tot = su.flow + inflow[u], sw = 0;
-            for (auto& e : T.adj[u]) if (G.st[e.first].hqDist < su.hqDist - 0.01f) { const Struct& v = G.st[e.first]; float cap = linkCap(su, v); sw += cap / (1 + T.linkFlow[e.second] / cap); }
-            if (sw <= 0 || tot <= 0) continue;
-            for (auto& e : T.adj[u]) if (G.st[e.first].hqDist < su.hqDist - 0.01f) {
-                const Struct& v = G.st[e.first]; float cap = linkCap(su, v); float share = tot * (cap / (1 + T.linkFlow[e.second] / cap)) / sw;
-                raw[e.second] += share; inflow[e.first] += share;
-            }
-        }
-        float k = std::min(1.f, dt * 3);
-        for (size_t j = 0; j < raw.size(); j++) T.linkFlow[j] += (raw[j] - T.linkFlow[j]) * k;
-        // congestion, from Command outward: a structure is as starved as the (flow-weighted) worst link on its way in
-        for (int q = (int)T.flowOrder.size() - 1; q >= 0; q--) {
-            int u = T.flowOrder[q]; Struct& su = G.st[u];
-            if (u == T.hq) { su.supply = 1; continue; }
-            float wsum = 0, c = 0, cmax = 0; int nd = 0;
-            for (auto& e : T.adj[u]) if (G.st[e.first].hqDist < su.hqDist - 0.01f) {
-                const Struct& v = G.st[e.first]; float over = std::max(T.linkFlow[e.second] / linkCap(su, v), cong[e.first]);
-                c += raw[e.second] * over; wsum += raw[e.second]; cmax = std::max(cmax, over); nd++;
-            }
-            cong[u] = wsum > 0 ? c / wsum : (nd ? cmax : 0);
-            su.supply = clampf(1 / std::max(1.f, cong[u]), 0.35f, 1);
-        }
+        Team& T = G.teams[t]; if (!T.used) continue;
+        sub.assign(G.st.size(), 0.f); T.linkFlow.assign(T.links.size(), 0.f);
+        for (size_t k = 0; k < G.st.size(); k++) if (!G.st[k].dead && G.st[k].team == t) sub[k] = G.st[k].flow;
+        for (int j = (int)T.links.size() - 1; j >= 0; j--) { int pa = T.links[j].first, ch = T.links[j].second; T.linkFlow[j] = sub[ch]; sub[pa] += sub[ch]; }
     }
     for (int t = 0; t < 4; t++) { Team& T = G.teams[t]; T.drainRate += (T.drainAcc / dt - T.drainRate) * std::min(1.f, dt * 1.5f); T.drainAcc = 0; }
 }
