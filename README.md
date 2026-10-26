@@ -124,6 +124,8 @@ Example: `BC_MUTE=1 SDL_AUDIODRIVER=dummy BC_WINDOW=1920x1080 BC_STATE=game BC_M
 
 ## Status
 
+- 26 Oct 2026: browser version live at https://belt-command.vercel.app. Mouse points (no edge scrolling), WASD scrolls, mouse works in menus. A multipath (web) network was tried and reverted: it made bases too hard to cut off and raids stalled. Online multiplayer is planned in `docs/ONLINE_MULTIPLAYER_HANDOVER.md`.
+
 - 26 Oct 2026: fixed pad buttons that often did not register. Presses were read once per drawn frame but used by the 60 Hz game step, so a press on a frame with no game step was dropped (and on slow frames one press counted twice or three times). Presses are now caught from SDL events, held until a game step uses them, and used exactly once. Virtual-pad test, 200 taps: old code 77 used at 144 fps and 600 at 20 fps; new code 200 at every frame rate.
 
 - 25 Oct 2026: added the Carrier, Research (crystal) and the Raid mode, plus glowing mining beams and flow-based link glow. Bot soak: raid games with 2-4 CPUs mostly end in 13-19 minutes (a few evenly matched 2- and 4-CPU games ran past 50); the alien modes play about as before. Not yet tried by people.
