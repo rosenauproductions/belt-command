@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <cstring>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -114,21 +115,24 @@ struct Dev {
     bool ml = false, mr = false, mouseMoved = false; V2 mouse; float wheel = 0;
     int digit = -1; // number key pressed since the last game step (keyboard)
     bool click = false, clickPend = false; // left mouse click (from events), kept apart from Space/Enter so menus can tell them apart
+    // online player (host side): filled from network input messages instead of SDL
+    bool remote = false, rheld[NB] = {}; V2 rmv, rcur; float rtl = 0, rtr = 0; int rsel = -1;
 };
 struct Player {
     bool joined = false, cpu = false, view = false; int dev = -9; int team = 0, idx = 0; Col col;
     V2 cur, cam; float zoom = 1, shake = 0; int sel = 1, hover = -1; float yHold = 0, toastT = 0; std::string toast; bool bigMap = false; bool devLost = false;
     SDL_Rect vp = { 0, 0, 0, 0 };
     float thinkT = 1, goalWait = 0, exploreT = 20; V2 goal; int goalType = -1, goalStruct = -1; bool hasGoal = false;
+    bool remote = false; std::string name, token; // online player: shown by name; the token lets them take their seat back after a drop
 };
 
-enum { ST_TITLE, ST_HELP, ST_OPTIONS, ST_LOBBY, ST_MISSIONS, ST_GAME, ST_ICON, ST_LOGO };
+enum { ST_TITLE, ST_HELP, ST_OPTIONS, ST_LOBBY, ST_MISSIONS, ST_GAME, ST_ICON, ST_LOGO, ST_JOIN, ST_TEXT, ST_NET };
 enum { MODE_COOP, MODE_ENDLESS, MODE_VERSUS, MODE_RAID, MODE_N };
 static const char* MODENAMES[MODE_N] = { "CO-OP MISSIONS", "CO-OP ENDLESS", "VERSUS", "RAID" };
 static const char* RESNAMES[5] = { "AUTO", "1280 X 720", "1920 X 1080", "2560 X 1440", "3840 X 2160" };
 static const int RESH[5] = { 0, 720, 1080, 1440, 2160 };
 
-struct Opts { int res = 0; bool glow = true, shake = true; int sfx = 8, mus = 5; unsigned done = 0; int bestEndless = 0; };
+struct Opts { int res = 0; bool glow = true, shake = true; int sfx = 8, mus = 5; unsigned done = 0; int bestEndless = 0; std::string name, token; };
 
 struct Game {
     SDL_Window* win = nullptr; SDL_Renderer* ren = nullptr; SDL_Texture* target = nullptr;
@@ -142,7 +146,7 @@ struct Game {
     Team teams[4]; int nTeams = 1;
     bool paused = false; int pauseSel = 0; int pauser = -1;
     int result = 0; float resultT = 0; int winner = -1; int resultSel = 0; std::string resultMsg;
-    bool quit = false; float alertT = 0;
+    bool quit = false; float alertT = 0; int gameId = 0;
     // test switches
     int shotFrame = -1; std::string shotPath = "shot.bmp"; bool bots = false; int fast = 1; int frame = 0;
 } G;
@@ -156,7 +160,7 @@ static bool seen(int viewerTeam, int team) { return !raid() || viewerTeam < 0 ||
 // ---------------------------------------------------------------- config
 static void saveCfg() {
     FILE* f = fopen(G.cfgPath.c_str(), "w"); if (!f) return;
-    fprintf(f, "res=%d\nglow=%d\nshake=%d\nsfx=%d\nmusic=%d\ndone=%u\nbest_endless=%d\n", G.opt.res, G.opt.glow, G.opt.shake, G.opt.sfx, G.opt.mus, G.opt.done, G.opt.bestEndless);
+    fprintf(f, "res=%d\nglow=%d\nshake=%d\nsfx=%d\nmusic=%d\ndone=%u\nbest_endless=%d\nname=%s\ntoken=%s\n", G.opt.res, G.opt.glow, G.opt.shake, G.opt.sfx, G.opt.mus, G.opt.done, G.opt.bestEndless, G.opt.name.c_str(), G.opt.token.c_str());
     fclose(f);
 #ifdef __EMSCRIPTEN__ // the browser keeps settings in localStorage
     EM_ASM({ try { localStorage.setItem('beltcommand.cfg', FS.readFile(UTF8ToString($0), { encoding: 'utf8' })); } catch (e) {} }, G.cfgPath.c_str());
@@ -167,9 +171,12 @@ static void loadCfg() {
     EM_ASM({ try { var t = localStorage.getItem('beltcommand.cfg'); if (t) FS.writeFile(UTF8ToString($0), t); } catch (e) {} }, G.cfgPath.c_str());
 #endif
     FILE* f = fopen(G.cfgPath.c_str(), "r"); if (!f) return;
-    char k[64]; long v;
-    while (fscanf(f, " %63[^=]=%ld", k, &v) == 2) {
-        std::string s = k;
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        char* eq = strchr(line, '='); if (!eq) continue; *eq = 0; std::string s = line, val = eq + 1;
+        while (!val.empty() && (val.back() == '\n' || val.back() == '\r')) val.pop_back();
+        if (s == "name") { G.opt.name = val.substr(0, 12); continue; } if (s == "token") { G.opt.token = val.substr(0, 32); continue; }
+        long v = atol(val.c_str());
         if (s == "res") G.opt.res = (int)clampf((float)v, 0, 4); else if (s == "glow") G.opt.glow = v != 0; else if (s == "shake") G.opt.shake = v != 0;
         else if (s == "sfx") G.opt.sfx = (int)clampf((float)v, 0, 10); else if (s == "music") G.opt.mus = (int)clampf((float)v, 0, 10);
         else if (s == "done") G.opt.done = (unsigned)v; else if (s == "best_endless") G.opt.bestEndless = (int)v;
@@ -193,30 +200,88 @@ static void setupTarget() {
     printf("video: output %dx%d, render %dx%d\n", G.outW, G.outH, G.W, G.H);
 }
 
+// ---------------------------------------------------------------- network byte buffers (used by net.inc; effects record events for online guests)
+struct WBuf {
+    std::string s;
+    void u8(int v) { s += (char)(uint8_t)v; }
+    void u16(int v) { u8(v & 255); u8((v >> 8) & 255); }
+    void i16(int v) { u16((uint16_t)(int16_t)clampf((float)v, -32768, 32767)); }
+    void u32(uint32_t v) { for (int i = 0; i < 4; i++) u8((v >> (i * 8)) & 255); }
+    void f32(float f) { uint32_t v; memcpy(&v, &f, 4); u32(v); }
+    void pos(V2 p) { i16((int)std::lround(p.x * 4)); i16((int)std::lround(p.y * 4)); } // world positions to 1/4 unit
+    void v2(V2 p) { f32(p.x); f32(p.y); }
+    void col(Col c) { u8(c.r); u8(c.g); u8(c.b); u8(c.a); }
+    void str(const std::string& t) { size_t n = std::min<size_t>(t.size(), 255); u8((int)n); s.append(t, 0, n); }
+    void ang(float a) { float t = std::fmod(a, 2 * PI); if (t < 0) t += 2 * PI; u8((int)(t / (2 * PI) * 256) & 255); }
+    void frac(float f) { u8((int)std::lround(clampf(f, 0, 1) * 255)); }
+};
+struct RBuf {
+    const uint8_t* p; size_t n, i = 0; bool bad = false;
+    RBuf(const std::string& s, size_t start = 0) : p((const uint8_t*)s.data()), n(s.size()), i(start) {}
+    int u8() { if (i >= n) { bad = true; return 0; } return p[i++]; }
+    int u16() { int a = u8(); return a | (u8() << 8); }
+    int i16() { return (int16_t)u16(); }
+    uint32_t u32() { uint32_t v = 0; for (int k = 0; k < 4; k++) v |= (uint32_t)u8() << (k * 8); return v; }
+    float f32() { uint32_t v = u32(); float f; memcpy(&f, &v, 4); return f; }
+    V2 pos() { float x = i16() / 4.f; return V2(x, i16() / 4.f); }
+    V2 v2() { float x = f32(); return V2(x, f32()); }
+    Col col() { int r = u8(), g = u8(), b = u8(); return Col(r, g, b, u8()); }
+    std::string str() { int k = u8(); if (i + k > n) { bad = true; return ""; } std::string t((const char*)p + i, k); i += k; return t; }
+    float ang() { return u8() / 256.f * 2 * PI; }
+    float frac() { return u8() / 255.f; }
+};
+// effect events sent to online guests (filled while hosting, sent with the next snapshot)
+enum { EV_EXPLODE = 1, EV_SPARKS, EV_RING, EV_SHAKE, EV_SFX, EV_SOUND, EV_PSOUND, EV_BEAM };
+static bool NETREC = false; static WBuf NETEV; static int FXDEPTH = 0;
+
 // ---------------------------------------------------------------- effects
 static void addPart(int kind, V2 p, V2 v, float life, Col c, float a = 0, float b = 0) {
     if (G.parts.size() > 5000) return;
     Part q; q.kind = kind; q.p = p; q.v = v; q.life = q.max = life; q.c = c; q.a = a; q.b = b; q.rot = R.range(0, 6.28f); q.spin = R.range(-6, 6); G.parts.push_back(q);
 }
-static void sparks(V2 p, int n, Col c, float spd) { for (int i = 0; i < n; i++) addPart(P_SPARK, p, fromAng(R.range(0, 6.28f)) * R.range(spd * 0.3f, spd), R.range(0.2f, 0.6f), c); }
-static void ring(V2 p, float r0, float r1, Col c, float life) { addPart(P_RING, p, V2(), life, c, r0, r1); }
+static void sparks(V2 p, int n, Col c, float spd) {
+    if (NETREC && !FXDEPTH) { NETEV.u8(EV_SPARKS); NETEV.pos(p); NETEV.u8(std::min(n, 255)); NETEV.col(c); NETEV.u16((int)spd); }
+    for (int i = 0; i < n; i++) addPart(P_SPARK, p, fromAng(R.range(0, 6.28f)) * R.range(spd * 0.3f, spd), R.range(0.2f, 0.6f), c); }
+static void ring(V2 p, float r0, float r1, Col c, float life) {
+    if (NETREC && !FXDEPTH) { NETEV.u8(EV_RING); NETEV.pos(p); NETEV.u16((int)r0); NETEV.u16((int)r1); NETEV.col(c); NETEV.u8((int)(life * 100)); }
+    addPart(P_RING, p, V2(), life, c, r0, r1); }
 static void shakeAt(V2 p, float amt) {
+    if (NETREC) { NETEV.u8(EV_SHAKE); NETEV.pos(p); NETEV.u8((int)amt); }
     if (!G.opt.shake) return;
     for (auto& q : G.pl) if (q.joined && q.view) { float d = dist(q.cam, p); if (d < 1400) q.shake = std::max(q.shake, amt * (1 - d / 1400)); }
 }
 static void sfxAt(int s, V2 p, float vol = 1, Uint32 gap = 30) {
+    if (NETREC) { NETEV.u8(EV_SFX); NETEV.u8(s); NETEV.pos(p); NETEV.frac(vol); }
     float best = 1e9, pan = 0;
     for (auto& q : G.pl) if (q.joined && q.view) { float d = dist(q.cam, p); if (d < best) { best = d; pan = clampf((p.x - q.cam.x) / 1200, -0.6f, 0.6f); } }
     float att = best > 1e8 ? 0.6f : clampf(1 - (best - 500) / 1700, 0.07f, 1);
     AU.play(s, vol * att, pan, R.range(0.94f, 1.06f), gap);
 }
 static void explode(V2 p, float size, Col c) {
+    if (NETREC) { NETEV.u8(EV_EXPLODE); NETEV.pos(p); NETEV.u16((int)size); NETEV.col(c); }
+    FXDEPTH++;
     ring(p, size * 0.3f, size * 2.2f, C_WHITE, 0.35f);
     ring(p, size * 0.2f, size * 3.2f, c, 0.6f);
     sparks(p, 8 + (int)(size * 0.6f), c, 120 + size * 6);
     sparks(p, 4 + (int)(size * 0.2f), C_WHITE, 90 + size * 4);
     addPart(P_DOT, p, V2(), 0.25f, c, size * 2.5f);
     for (int i = 0; i < 3 + (int)(size / 10); i++) addPart(P_DEBRIS, p, fromAng(R.range(0, 6.28f)) * R.range(20, 60 + size * 2), R.range(0.6f, 1.4f), c, R.range(3, 4 + size * 0.25f));
+    FXDEPTH--;
+}
+static void addBeam(V2 a, V2 b, float life, float w, Col c) {
+    if (NETREC) { NETEV.u8(EV_BEAM); NETEV.pos(a); NETEV.pos(b); NETEV.u8((int)(life * 100)); NETEV.u8((int)(w * 10)); NETEV.col(c); }
+    G.beams.push_back({ a, b, life, life, w, c });
+}
+// a sound for everyone on a team (-1: everyone), including online guests
+static void teamSound(int s, float vol, int team) {
+    if (NETREC) { NETEV.u8(EV_SOUND); NETEV.u8(s); NETEV.frac(vol); NETEV.u8(team & 255); }
+    bool local = team < 0; for (auto& q : G.pl) if (q.joined && q.team == team && !q.cpu && !q.remote) local = true;
+    if (local) AU.play(s, vol);
+}
+// a sound for one player (menu clicks, errors): local players hear it here, online players on their own device
+static void pSound(const Player& p, int s, float vol) {
+    if (p.remote) { if (NETREC) { NETEV.u8(EV_PSOUND); NETEV.u8(s); NETEV.frac(vol); NETEV.u8(p.idx); } return; }
+    AU.play(s, vol);
 }
 static void toast(Player& p, const std::string& s) { p.toast = s; p.toastT = 1.8f; }
 
@@ -338,4 +403,6 @@ static const char* canPlace(int team, int t, V2 q) {
 
 #include "sim.inc"
 #include "render.inc"
+#include "qr.h"
+#include "net.inc"
 #include "ui.inc"

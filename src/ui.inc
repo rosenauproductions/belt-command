@@ -2,10 +2,11 @@
 
 static int PADTEST_HITS = 0; // BC_PADTEST: how many RB presses the game acted on
 #ifdef __EMSCRIPTEN__
-static const int NTITLE = 3; // a web page has nothing to quit to
+static const int NTITLE = 4; // a web page has nothing to quit to
 #else
-static const int NTITLE = 4;
+static const int NTITLE = 5;
 #endif
+enum { TI_PLAY, TI_JOIN, TI_HELP, TI_OPTIONS, TI_QUIT };
 static Dev* devById(int id) { for (auto& d : G.devs) if (d.id == id) return &d; return nullptr; }
 static Dev* kbd() { return devById(-1); }
 // a press counts exactly once: latched until the next game step or menu update uses it
@@ -112,6 +113,9 @@ static void readDevs(float dt, bool inGame) {
             float sx = (float)G.W / G.outW, sy = (float)G.H / G.outH; int ww, wh; SDL_GetWindowSize(G.win, &ww, &wh);
             float ox = mx * (float)G.outW / std::max(ww, 1), oy = my * (float)G.outH / std::max(wh, 1);
             d.mouse = V2(ox * sx, oy * sy);
+        } else if (d.remote) { // online player: what their last input message said
+            for (int k = 0; k < NB; k++) d.b[k] = d.rheld[k];
+            d.mv = d.rmv; d.tl = d.rtl; d.tr = d.rtr;
         } else if (d.gc) {
             auto Bt = [&](SDL_GameControllerButton b) { return SDL_GameControllerGetButton(d.gc, b) != 0; };
             d.b[B_A] = Bt(SDL_CONTROLLER_BUTTON_A); d.b[B_B] = Bt(SDL_CONTROLLER_BUTTON_B); d.b[B_X] = Bt(SDL_CONTROLLER_BUTTON_X); d.b[B_Y] = Bt(SDL_CONTROLLER_BUTTON_Y);
@@ -141,6 +145,7 @@ struct MenuIn { int x = 0, y = 0; bool a = false, b = false, start = false; int 
 static MenuIn menuInput() {
     MenuIn m;
     for (auto& d : G.devs) {
+        if (d.remote) continue; // online players never drive the host's menus
         if (d.navX) m.x = d.navX; if (d.navY) m.y = d.navY;
         if (pr(d, B_A)) { m.a = true; m.devA = d.id; }
         if (pr(d, B_B)) m.b = true; if (pr(d, B_START)) m.start = true;
@@ -166,7 +171,10 @@ static void updatePlayer(Player& p, float dt) {
     p.zoom = clampf(p.zoom * (1 - z), 0.4f, 1.7f);
     float vs = viewScale(p);
     int barSlot = -1;
-    if (d->id == -1) {
+    if (d->remote) { // online player: the cursor and selection come from their own device
+        p.cur = V2(clampf(d->rcur.x, -100, G.WW + 100), clampf(d->rcur.y, -100, G.WH + 100)); p.cam = p.cur;
+        if (d->rsel >= 0 && d->rsel < NBUILD) p.sel = d->rsel;
+    } else if (d->id == -1) {
         // keyboard + mouse: WASD / arrows scroll the map, the mouse only points (no edge scrolling)
         V2 off = p.cur - p.cam;
         p.cam += d->mv * (900 / p.zoom * dt);
@@ -193,12 +201,12 @@ static void updatePlayer(Player& p, float dt) {
     if (d->id == -1 && d->digit >= 0) { if (d->digit < NBUILD && p.sel != d->digit) { p.sel = d->digit; AU.play(SND_UI, 0.5f); } d->digit = -1; }
     if (barSlot >= 0 && d->clickPend) { if (p.sel != barSlot) { p.sel = barSlot; AU.play(SND_UI, 0.5f); } d->pend[B_A] = false; } // clicking the build bar picks, never builds
     bool own = p.hover >= 0 && G.st[p.hover].team == p.team;
-    if (pr(*d, B_A)) { if (own) toast(p, "SPACE TAKEN - MOVE OFF THE STRUCTURE"), AU.play(SND_ERR, 0.4f); else tryBuild(p, BUILDS[p.sel], p.cur, false); }
-    if (pr(*d, B_X)) { if (own) tryUpgrade(p, p.hover, false); else { toast(p, "POINT AT A STRUCTURE TO UPGRADE"); AU.play(SND_ERR, 0.4f); } }
+    if (pr(*d, B_A)) { if (own) toast(p, "SPACE TAKEN - MOVE OFF THE STRUCTURE"), pSound(p, SND_ERR, 0.4f); else tryBuild(p, BUILDS[p.sel], p.cur, false); }
+    if (pr(*d, B_X)) { if (own) tryUpgrade(p, p.hover, false); else { toast(p, "POINT AT A STRUCTURE TO UPGRADE"); pSound(p, SND_ERR, 0.4f); } }
     if (d->b[B_Y] && own && G.st[p.hover].t != S_HQ) { p.yHold += dt; if (p.yHold >= 0.6f) { recycle(p, p.hover); p.yHold = -10; } }
     else if (!d->b[B_Y]) p.yHold = 0; else p.yHold = std::min(p.yHold, 0.f);
     if (pr(*d, B_B)) {
-        G.pings.push_back({ p.cur, 3.0f, p.idx }); AU.play(SND_PING, 0.5f);
+        G.pings.push_back({ p.cur, 3.0f, p.idx }); pSound(p, SND_PING, 0.5f);
         // raid: ping a rival structure to send every fighter at it
         if (raid() && p.hover >= 0 && G.st[p.hover].team != p.team) { T.order = p.hover; T.orderT = 45; for (auto& f : G.fi) if (f.team == p.team) f.retarget = 0; toast(p, "FIGHTERS ATTACKING"); }
     }
@@ -242,6 +250,142 @@ static void joinPlayer(int devId, bool cpu) {
         return;
     }
 }
+
+// ---------------------------------------------------------------- joining an online game: join screen, typing names and codes
+#ifndef __EMSCRIPTEN__
+static bool NETTUN_ON() { return NH.tstate == 1 || NH.tstate == 2; }
+#else
+static bool NETTUN_ON() { return false; }
+#endif
+static struct { int purpose = 0, key = 0, back = ST_JOIN; std::string text, lastCode, after; bool mouseHot = false; } TX; // purpose 0: name, 1: code
+static const char* KEYROWS[4] = { "ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ0123", "456789-.:/" };
+enum { K_DEL = 40, K_SPACE = 41, K_DONE = 42 };
+static void keyRect(int k, float& x, float& y, float& w, float& h) {
+    float u = G.H / 1080.f, cw = 104 * u, ch = 78 * u, gap = 10 * u, x0 = G.W * 0.5f - (10 * cw + 9 * gap) / 2, y0 = 420 * u;
+    if (k < 40) { x = x0 + (k % 10) * (cw + gap); y = y0 + (k / 10) * (ch + gap); w = cw; h = ch; return; }
+    int c0 = k == K_DEL ? 0 : k == K_SPACE ? 3 : 7, c1 = k == K_DEL ? 2 : k == K_SPACE ? 6 : 9;
+    x = x0 + c0 * (cw + gap); y = y0 + 4 * (ch + gap); w = (c1 - c0 + 1) * cw + (c1 - c0) * gap; h = ch;
+}
+static void startText(int purpose, const std::string& after = "") {
+    TX.purpose = purpose; TX.after = after; TX.back = G.state == ST_TEXT ? ST_JOIN : G.state; TX.key = 0;
+    TX.text = purpose == 0 ? G.opt.name : TX.lastCode;
+    G.state = ST_TEXT; G.stateT = 0; SDL_StartTextInput();
+}
+static void textDone() {
+    SDL_StopTextInput();
+    if (TX.purpose == 0) {
+        std::string n = cleanName(TX.text); G.opt.name = n.empty() ? "GUEST" : n; saveCfg(); AU.play(SND_UI_OK, 0.7f);
+        if (!TX.after.empty()) { guestConnect(TX.after); return; }
+        G.state = ST_JOIN; G.menuSel = 0; return;
+    }
+    TX.lastCode = TX.text; AU.play(SND_UI_OK, 0.7f); guestConnect(TX.text);
+}
+static void textCancel() { SDL_StopTextInput(); G.state = TX.back == ST_TEXT ? ST_JOIN : TX.back; if (G.state != ST_JOIN && G.state != ST_TITLE) G.state = ST_JOIN; G.menuSel = 0; AU.play(SND_UI, 0.6f); }
+static void textType(const char* t) {
+    size_t maxLen = TX.purpose == 0 ? 12 : 64;
+    for (const char* c = t; *c; c++) {
+        char ch = (char)toupper((unsigned char)*c);
+        bool ok = isalnum((unsigned char)ch) || ch == '-' || ch == '.' || (TX.purpose == 0 ? (ch == ' ' || ch == '_') : (ch == ':' || ch == '/' || ch == '#' || ch == '='));
+        if (ok && TX.text.size() < maxLen) TX.text += ch;
+    }
+}
+static void textKey(SDL_Scancode sc) {
+    if (sc == SDL_SCANCODE_BACKSPACE) { if (!TX.text.empty()) TX.text.pop_back(); }
+    else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER) textDone();
+    else if (sc == SDL_SCANCODE_ESCAPE) textCancel();
+    else if (sc == SDL_SCANCODE_V && (SDL_GetModState() & (KMOD_CTRL | KMOD_GUI))) { char* c = SDL_GetClipboardText(); if (c) { textType(c); SDL_free(c); } }
+}
+static void pressKey(int k) {
+    if (k == K_DEL) { if (!TX.text.empty()) TX.text.pop_back(); }
+    else if (k == K_SPACE) { if (TX.purpose == 0) textType(" "); }
+    else if (k == K_DONE) textDone();
+    else { char c[2] = { KEYROWS[k / 10][k % 10], 0 }; textType(c); }
+    AU.play(SND_UI, 0.4f);
+}
+static void updateText(MenuIn& m) {
+    int row = TX.key < 40 ? TX.key / 10 : 4, col = TX.key < 40 ? TX.key % 10 : TX.key == K_DEL ? 1 : TX.key == K_SPACE ? 4 : 8;
+    if (m.x || m.y) {
+        row = (row + m.y + 5) % 5; col = (col + m.x + 10) % 10;
+        TX.key = row < 4 ? row * 10 + col : col <= 2 ? K_DEL : col <= 6 ? K_SPACE : K_DONE; AU.play(SND_UI, 0.3f);
+    }
+    if (Dev* k = kbd()) for (int i = 0; i <= K_DONE; i++) { float x, y, w, h; keyRect(i, x, y, w, h); if (mouseIn(x, y, w, h)) { if (k->mouseMoved) TX.key = i; if (k->clickPend) pressKey(i); } }
+    for (auto& d : G.devs) if (!d.remote && d.id != -1) { // pads (keyboard typing arrives as text)
+        if (pr(d, B_A)) pressKey(TX.key);
+        if (pr(d, B_B)) { if (TX.text.empty()) { textCancel(); return; } TX.text.pop_back(); }
+        if (pr(d, B_START)) { textDone(); return; }
+    }
+}
+static void joinItems(std::vector<std::string>& it) {
+    it.clear();
+    for (auto& g : LANS) { char b[128]; snprintf(b, sizeof b, "%s  -  %d PLAYER%s", g.name.c_str(), g.players, g.players == 1 ? "" : "S"); it.push_back(b); }
+#ifdef __EMSCRIPTEN__
+    it.push_back("ENTER CODE");
+#else
+    it.push_back("ENTER CODE OR ADDRESS");
+#endif
+    it.push_back("YOUR NAME: " + myName());
+    it.push_back("BACK");
+}
+static void updateJoin(MenuIn& m, float) {
+    std::vector<std::string> it; joinItems(it); int n = (int)it.size(), nl = (int)LANS.size();
+    if (G.menuSel >= n) G.menuSel = n - 1;
+    if (m.y) { G.menuSel = (G.menuSel + m.y + n) % n; AU.play(SND_UI, 0.6f); }
+    { bool c; menuMouse(G.menuSel, c); if (c) m.a = true; }
+    if (m.b) { G.state = ST_TITLE; G.menuSel = TI_JOIN; AU.play(SND_UI, 0.6f); return; }
+    if (!(m.a || m.start)) return;
+    AU.play(SND_UI_OK, 0.7f);
+    int s = G.menuSel;
+    if (s < nl) { std::string t = LANS[s].ip + ":" + std::to_string(LANS[s].port); if (G.opt.name.empty()) startText(0, t); else guestConnect(t); }
+    else if (s == nl) startText(1);
+    else if (s == nl + 1) startText(0);
+    else { G.state = ST_TITLE; G.menuSel = TI_JOIN; }
+}
+static void renderJoin(Canvas& cv, float u, float cx) {
+    FONT.draw(cv, "JOIN GAME", V2(cx, 110 * u), 50 * u, PCOL[0], 1, 0, 1.1f);
+#ifdef __EMSCRIPTEN__
+    const char* l1 = "THE HOST OPENS THE LOBBY ON THEIR BATOCERA BOX AND PRESSES BACK FOR AN INTERNET CODE.";
+#else
+    const char* l1 = LANS.empty() ? "LOOKING FOR GAMES ON THIS NETWORK..." : "GAMES ON THIS NETWORK:";
+#endif
+    FONT.draw(cv, l1, V2(cx, 210 * u), 17 * u, withA(C_WHITE, 0.8f), 1);
+    std::vector<std::string> it; joinItems(it); std::vector<const char*> ip; for (auto& s2 : it) ip.push_back(s2.c_str());
+    menuList(cv, ip.data(), (int)ip.size(), G.menuSel, cx, 300 * u, 28 * u, 58 * u);
+    FONT.draw(cv, "A SELECT    B BACK", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.95f), 1);
+}
+static void renderText(Canvas& cv, float u, float cx) {
+    FONT.draw(cv, TX.purpose == 0 ? "YOUR NAME" : "ENTER THE CODE", V2(cx, 110 * u), 50 * u, PCOL[0], 1, 0, 1.1f);
+    if (TX.purpose == 1) FONT.draw(cv, "THE CODE IS ON THE HOST'S LOBBY SCREEN.  ON THE SAME WI-FI YOU CAN TYPE ITS ADDRESS.", V2(cx, 200 * u), 16 * u, withA(C_WHITE, 0.75f), 1);
+    float fw = 1190 * u, fx = cx - fw / 2, fy = 250 * u;
+    drawPanel(cv, fx, fy, fw, 110 * u, PCOL[0], u);
+    std::string t = TX.text; bool blink = std::fmod(G.stateT, 1.f) < 0.5f;
+    float fs = std::min(40 * u, (fw - 60 * u) / std::max(8.f, (float)t.size() + 1));
+    float tw = Font::width(t.c_str(), fs); FONT.draw(cv, t.c_str(), V2(cx - tw / 2, fy + 34 * u), fs, C_WHITE, 0, 0, 0.8f);
+    if (blink) cv.rect(cx + tw / 2 + 6 * u, fy + 32 * u, 3 * u, fs, withA(PCOL[0], 0.9f));
+    for (int k = 0; k <= K_DONE; k++) {
+        if (k == K_SPACE && TX.purpose != 0) continue;
+        float x, y, w, h; keyRect(k, x, y, w, h); bool sel = k == TX.key;
+        drawPanel(cv, x, y, w, h, sel ? C_WHITE : withA(PCOL[0], 0.5f), u);
+        char lab[8]; if (k < 40) { lab[0] = KEYROWS[k / 10][k % 10]; lab[1] = 0; } else snprintf(lab, sizeof lab, "%s", k == K_DEL ? "DEL" : k == K_SPACE ? "SPACE" : "DONE");
+        float ls = k < 40 ? 34 * u : 24 * u;
+        FONT.draw(cv, lab, V2(x + w / 2, y + h / 2 - ls / 2), ls, sel ? C_WHITE : k == K_DONE ? C_GOOD : withA(C_WHITE, 0.8f), 1, 0, sel ? 1 : 0.3f);
+    }
+    FONT.draw(cv, "TYPE ON A KEYBOARD, OR PICK KEYS: A TYPE   B DELETE   START DONE   ESC CANCEL", V2(cx, G.H - 60 * u), 15 * u, withA(C_DIM, 0.95f), 1);
+}
+// links: belt-command.vercel.app/#join=<code>, or the page served by a box (http://<box>:8095/#join)
+static void autoJoin() {
+#ifdef __EMSCRIPTEN__
+    std::string hash = emscripten_run_script_string("location.hash"), host = emscripten_run_script_string("location.host"), prot = emscripten_run_script_string("location.protocol"), port = emscripten_run_script_string("location.port");
+    std::string target;
+    if (hash.rfind("#join=", 0) == 0) target = hash.substr(6);
+    else if (hash == "#join" || (prot == "http:" && port == std::to_string(NET_PORT))) target = host;
+    if (target.empty()) return;
+    printf("net: link asks to join %s\n", target.c_str());
+    if (G.opt.name.empty()) startText(0, target); else guestConnect(target);
+#else
+    if (getenv("BC_JOIN")) { if (G.opt.name.empty()) G.opt.name = getenv("BC_NAME") ? getenv("BC_NAME") : "BOX"; guestConnect(getenv("BC_JOIN")); }
+#endif
+}
+
 static void updateMenus(float dt) {
     MenuIn m = menuInput(); G.stateT += dt;
     switch (G.state) {
@@ -250,11 +394,15 @@ static void updateMenus(float dt) {
         { bool c; menuMouse(G.menuSel, c); if (c) m.a = true; }
         if (m.a || m.start) {
             AU.play(SND_UI_OK, 0.7f);
-            if (G.menuSel == 0) enterLobby(); else if (G.menuSel == 1) { G.state = ST_HELP; G.stateT = 0; } else if (G.menuSel == 2) { G.state = ST_OPTIONS; G.menuSel = 0; } else G.quit = true;
+            if (G.menuSel == TI_PLAY) enterLobby(); else if (G.menuSel == TI_JOIN) { G.state = ST_JOIN; G.menuSel = 0; G.stateT = 0; LANS.clear(); }
+            else if (G.menuSel == TI_HELP) { G.state = ST_HELP; G.stateT = 0; } else if (G.menuSel == TI_OPTIONS) { G.state = ST_OPTIONS; G.menuSel = 0; } else G.quit = true;
         }
         break;
     }
-    case ST_HELP: if (m.a || m.b || m.start || (kbd() && kbd()->clickPend)) { G.state = ST_TITLE; G.menuSel = 1; AU.play(SND_UI, 0.6f); } break;
+    case ST_HELP: if (m.a || m.b || m.start || (kbd() && kbd()->clickPend)) { G.state = ST_TITLE; G.menuSel = TI_HELP; AU.play(SND_UI, 0.6f); } break;
+    case ST_JOIN: updateJoin(m, dt); break;
+    case ST_TEXT: updateText(m); break;
+    case ST_NET: if (m.a || m.b || m.start || (kbd() && kbd()->clickPend)) { G.state = ST_JOIN; G.menuSel = 0; AU.play(SND_UI, 0.6f); } break;
     case ST_OPTIONS: {
         if (m.y) { G.menuSel = (G.menuSel + m.y + 6) % 6; AU.play(SND_UI, 0.6f); }
         { bool c; menuMouse(G.menuSel, c); if (c) m.a = true; }
@@ -267,16 +415,19 @@ static void updateMenus(float dt) {
             case 2: G.opt.shake = !G.opt.shake; break;
             case 3: G.opt.sfx = (int)clampf((float)(G.opt.sfx + (m.a ? 0 : dx)), 0, 10); break;
             case 4: G.opt.mus = (int)clampf((float)(G.opt.mus + (m.a ? 0 : dx)), 0, 10); break;
-            case 5: if (m.a) { saveCfg(); G.state = ST_TITLE; G.menuSel = 2; } break;
+            case 5: if (m.a) { saveCfg(); G.state = ST_TITLE; G.menuSel = TI_OPTIONS; } break;
             }
             applyAudioVol();
         }
-        if (m.b) { saveCfg(); G.state = ST_TITLE; G.menuSel = 2; }
+        if (m.b) { saveCfg(); G.state = ST_TITLE; G.menuSel = TI_OPTIONS; }
         break;
     }
     case ST_LOBBY: {
         bool startNow = false;
+        bool localIn = false; for (auto& p : G.pl) if (p.joined && !p.cpu && !p.remote) localIn = true;
         for (auto& d : G.devs) {
+            if (d.remote) continue;
+            if (pr(d, B_BACK)) { if (NETTUN_ON()) tunnelStop(); else tunnelStart(); AU.play(SND_UI_OK, 0.6f); }
             int pi = -1; for (int i = 0; i < 4; i++) if (G.pl[i].joined && !G.pl[i].cpu && G.pl[i].dev == d.id) pi = i;
             if (pi < 0 && pr(d, B_A) && joinedCount() < 4) { joinPlayer(d.id, false); continue; }
             if (pi >= 0) {
@@ -285,7 +436,7 @@ static void updateMenus(float dt) {
                 if (pr(d, B_Y)) { for (int i = 3; i >= 0; i--) if (G.pl[i].joined && G.pl[i].cpu) { G.pl[i].joined = false; AU.play(SND_UI, 0.6f); break; } }
                 if (d.navX) { G.mode = (G.mode + d.navX + MODE_N) % MODE_N; AU.play(SND_UI, 0.6f); }
                 if (pr(d, B_START)) startNow = true;
-            } else if (pr(d, B_B) && joinedCount() == 0) { G.state = ST_TITLE; G.menuSel = 0; AU.play(SND_UI, 0.6f); }
+            } else if (pr(d, B_B) && !localIn) { for (auto& p : G.pl) if (p.joined && p.cpu && !p.remote) p.joined = false; G.state = ST_TITLE; G.menuSel = 0; AU.play(SND_UI, 0.6f); }
         }
         if (Dev* k = kbd()) if (k->clickPend && LB.frame >= G.frame - 2) {
             bool kbJoined = false; for (auto& p : G.pl) if (p.joined && !p.cpu && p.dev == -1) kbJoined = true;
@@ -324,9 +475,9 @@ static void renderMenus(Canvas& cv) {
     switch (G.state) {
     case ST_TITLE: {
         drawLogo(cv, cx, G.H * 0.2f, 96 * u);
-        const char* items[4] = { "PLAY", "HOW TO PLAY", "OPTIONS", "QUIT" };
-        menuList(cv, items, NTITLE, G.menuSel, cx, G.H * 0.52f, 34 * u, 62 * u);
-        FONT.draw(cv, "1-4 PLAYERS  -  SPLIT SCREEN", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.9f), 1);
+        const char* items[5] = { "PLAY", "JOIN GAME", "HOW TO PLAY", "OPTIONS", "QUIT" };
+        menuList(cv, items, NTITLE, G.menuSel, cx, G.H * 0.48f, 34 * u, 62 * u);
+        FONT.draw(cv, "1-4 PLAYERS  -  SPLIT SCREEN  -  ONLINE", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.9f), 1);
         break;
     }
     case ST_HELP: {
@@ -381,24 +532,26 @@ static void renderMenus(Canvas& cv) {
             char t[32]; snprintf(t, sizeof t, "P%d", i + 1);
             FONT.draw(cv, t, V2(x + pw / 2, y0 + 40 * u), 64 * u, p.joined ? p.col : withA(C_DIM, 0.4f), 1, 0, p.joined ? 1 : 0.2f);
             if (p.joined) {
-                std::string nm = p.cpu ? "CPU" : p.dev == -1 ? "KEYBOARD + MOUSE" : (devById(p.dev) ? devById(p.dev)->name : "PAD");
+                std::string nm = GS.on ? p.name : p.remote ? p.name : p.cpu ? "CPU" : p.dev == -1 ? "KEYBOARD + MOUSE" : (devById(p.dev) ? devById(p.dev)->name : "PAD");
                 for (auto& ch : nm) ch = (char)toupper(ch); if (nm.size() > 20) nm = nm.substr(0, 20);
                 FONT.draw(cv, nm.c_str(), V2(x + pw / 2, y0 + 150 * u), 15 * u, C_WHITE, 1);
                 Struct g; g.t = S_HQ; g.p = V2(0, 0); g.team = 0; g.built = 1; g.powered = true; g.maxhp = g.hp = 1;
                 View iv; iv.vp = { (int)x, (int)(y0 + 190 * u), (int)pw, (int)(100 * u) }; iv.cam = V2(); iv.s = 1.3f * u;
                 drawStruct(cv, iv, g, p.col, 1, true);
-                FONT.draw(cv, p.cpu ? "" : "READY", V2(x + pw / 2, y0 + ph - 34 * u), 16 * u, C_GOOD, 1);
+                const char* tag = GS.on && i == GS.slot ? "YOU" : p.remote ? (p.cpu ? "ONLINE - AWAY (CPU)" : "ONLINE") : p.cpu ? "" : "READY";
+                FONT.draw(cv, tag, V2(x + pw / 2, y0 + ph - 34 * u), 16 * u, p.remote || (GS.on && i == GS.slot) ? C_MIN : C_GOOD, 1);
             } else {
                 float bl = 0.5f + 0.5f * std::sin(G.stateT * 4 + i);
-                FONT.draw(cv, "PRESS A", V2(x + pw / 2, y0 + 170 * u), 22 * u, withA(C_WHITE, 0.4f + 0.5f * bl), 1);
-                FONT.draw(cv, "TO JOIN", V2(x + pw / 2, y0 + 205 * u), 22 * u, withA(C_WHITE, 0.4f + 0.5f * bl), 1);
+                FONT.draw(cv, GS.on ? "OPEN" : "PRESS A", V2(x + pw / 2, y0 + 170 * u), 22 * u, withA(C_WHITE, 0.4f + 0.5f * bl), 1);
+                FONT.draw(cv, GS.on ? "SEAT" : "TO JOIN", V2(x + pw / 2, y0 + 205 * u), 22 * u, withA(C_WHITE, 0.4f + 0.5f * bl), 1);
             }
         }
         float my = y0 + ph + 70 * u;
         char ml[64]; snprintf(ml, sizeof ml, "<  %s  >", MODENAMES[G.mode]);
         FONT.draw(cv, ml, V2(cx, my), 34 * u, PCOL[0], 1, 0, 1.0f);
         { float mw = Font::width(ml, 34 * u) + 40 * u; LB.mx = cx - mw / 2; LB.my = my - 14 * u; LB.mw = mw; LB.mh = 70 * u; LB.frame = G.frame; }
-        { bool any = false; for (auto& p : G.pl) if (p.joined && !p.cpu) any = true;
+        if (GS.on) { FONT.draw(cv, "WAITING FOR THE HOST TO START", V2(cx, my + 150 * u), 24 * u, withA(PCOL[0], 0.6f + 0.4f * std::sin(G.stateT * 3)), 1); }
+        else { bool any = false; for (auto& p : G.pl) if (p.joined && !p.cpu) any = true;
           float bw = 260 * u, bh = 64 * u, bx = cx - bw / 2, by = my + 130 * u; LB.sx = bx; LB.sy = by; LB.sw = bw; LB.sh = bh;
           bool hot = mouseIn(bx, by, bw, bh);
           drawPanel(cv, bx, by, bw, bh, any ? (hot ? C_WHITE : PCOL[0]) : withA(C_DIM, 0.5f), u);
@@ -406,21 +559,24 @@ static void renderMenus(Canvas& cv) {
         const char* md = G.mode == MODE_COOP ? "SHARE ONE BASE AND ONE STOCKPILE. PLAY THE MISSIONS." : G.mode == MODE_ENDLESS ? "SHARE ONE BASE. THE WAVES NEVER STOP." : G.mode == MODE_VERSUS ? "EVERYONE BUILDS THEIR OWN BASE. TURRETS FIRE ON RIVALS TOO." : "NO ALIENS. YOUR FRIENDS ARE THE RIVALS. FIND THEIR BASES AND SEND CARRIER FIGHTERS.";
         FONT.draw(cv, md, V2(cx, my + 56 * u), 18 * u, withA(C_WHITE, 0.85f), 1);
         if (G.mode == MODE_ENDLESS && G.opt.bestEndless > 0) FONT.draw(cv, ("BEST " + mmss((float)G.opt.bestEndless)).c_str(), V2(cx, my + 92 * u), 16 * u, C_MIN, 1);
-        FONT.draw(cv, "A JOIN    B LEAVE    LEFT/RIGHT MODE    X ADD CPU    Y REMOVE CPU    START BEGIN", V2(cx, G.H - 70 * u), 16 * u, withA(C_DIM, 0.95f), 1);
+        if (GS.on) FONT.draw(cv, "THE HOST PICKS THE MODE AND STARTS   -   B LEAVE THE GAME", V2(cx, G.H - 70 * u), 16 * u, withA(C_DIM, 0.95f), 1);
+        else { drawHostPanel(cv, u); FONT.draw(cv, "A JOIN    B LEAVE    LEFT/RIGHT MODE    X ADD CPU    Y REMOVE CPU    BACK ONLINE    START BEGIN", V2(cx, G.H - 40 * u), 15 * u, withA(C_DIM, 0.95f), 1); }
         break;
     }
+    case ST_JOIN: renderJoin(cv, u, cx); break;
+    case ST_TEXT: renderText(cv, u, cx); break;
     case ST_MISSIONS: {
         FONT.draw(cv, "MISSIONS", V2(cx, 80 * u), 50 * u, PCOL[0], 1, 0, 1.1f);
         float y0 = 190 * u, rh = 92 * u, w = 1100 * u;
         for (int i = 0; i < NMISSIONS; i++) {
-            bool s = i == G.menuSel, done = G.opt.done & (1u << i); float y = y0 + i * rh;
+            bool s = i == G.menuSel, done = (GS.on ? GS.hostDone : G.opt.done) & (1u << i); float y = y0 + i * rh;
             if (s) drawPanel(cv, cx - w / 2, y - 12 * u, w, rh - 10 * u, PCOL[0], u);
             char t[64]; snprintf(t, sizeof t, "%d  %s", i + 1, MISSIONS[i].name);
             FONT.draw(cv, t, V2(cx - w / 2 + 30 * u, y), 28 * u, s ? PCOL[0] : withA(C_WHITE, 0.7f), 0, 0, s ? 1 : 0.3f);
             FONT.draw(cv, MISSIONS[i].desc, V2(cx - w / 2 + 30 * u, y + 40 * u), 15 * u, withA(C_WHITE, s ? 0.9f : 0.5f));
             if (done) FONT.draw(cv, "COMPLETE", V2(cx + w / 2 - 30 * u, y + 6 * u), 18 * u, C_GOOD, 2);
         }
-        FONT.draw(cv, "A START    B BACK", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.95f), 1);
+        FONT.draw(cv, GS.on ? "THE HOST PICKS THE MISSION   -   B LEAVE THE GAME" : "A START    B BACK", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.95f), 1);
         break;
     }
     }
@@ -457,7 +613,8 @@ static void renderOverlay(Canvas& cv) {
     float u = G.H / 1080.f, cx = G.W * 0.5f;
     if (G.paused && !G.result) {
         cv.rect(0, 0, (float)G.W, (float)G.H, Col(0, 0, 0, 150));
-        FONT.draw(cv, "PAUSED", V2(cx, G.H * 0.3f), 60 * u, PCOL[0], 1, 0, 1.1f);
+        FONT.draw(cv, GS.on ? "PAUSED BY THE HOST" : "PAUSED", V2(cx, G.H * 0.3f), 60 * u, PCOL[0], 1, 0, 1.1f);
+        if (GS.on) { cv.flush(G.ren); return; }
         const char* items[3] = { "RESUME", "RESTART", "QUIT TO TITLE" };
         menuList(cv, items, 3, G.pauseSel, cx, G.H * 0.48f, 30 * u, 60 * u);
     }
@@ -465,7 +622,7 @@ static void renderOverlay(Canvas& cv) {
         float a = clampf((G.resultT - 0.8f) * 2, 0, 1);
         cv.rect(0, 0, (float)G.W, (float)G.H, Col(0, 0, 0, (int)(170 * a)));
         std::string title; Col tc = PCOL[0];
-        if (rivals()) { if (G.winner >= 0) { for (auto& p : G.pl) if (p.joined && p.team == G.winner) { title = std::string(p.cpu ? "CPU " : "") + "P" + std::to_string(p.idx + 1) + " WINS"; tc = p.col; } } else title = "DRAW"; }
+        if (rivals()) { if (G.winner >= 0) { for (auto& p : G.pl) if (p.joined && p.team == G.winner) { title = p.remote ? p.name + " WINS" : std::string(p.cpu ? "CPU " : "") + "P" + std::to_string(p.idx + 1) + " WINS"; tc = p.col; } } else title = "DRAW"; }
         else title = G.result == 1 ? "MISSION COMPLETE" : (G.mode == MODE_ENDLESS ? "THE BELT IS LOST" : "MISSION FAILED");
         if (G.result == 2) tc = C_BAD;
         FONT.draw(cv, title.c_str(), V2(cx, G.H * 0.2f), 64 * u, withA(tc, a), 1, 0, 1.2f);
@@ -476,7 +633,8 @@ static void renderOverlay(Canvas& cv) {
             snprintf(b, sizeof b, "%s   MINED %d   KILLS %d   BUILT %d   FIGHTERS LOST %d   TIME %s", rivals() ? ("TEAM " + std::to_string(t + 1)).c_str() : "", (int)T.mined, T.kills, T.built, T.ftrLost, mmss(G.time).c_str());
             FONT.draw(cv, b, V2(cx, y + t * 40 * u), 20 * u, withA(T.col, a), 1);
         }
-        if (G.resultT > 1.6f) {
+        if (G.resultT > 1.6f && GS.on) FONT.draw(cv, "WAITING FOR THE HOST", V2(cx, G.H * 0.7f), 26 * u, withA(PCOL[0], 0.6f + 0.4f * std::sin(G.stateT * 3)), 1);
+        else if (G.resultT > 1.6f) {
             bool canNext = G.mode == MODE_COOP && G.result == 1 && G.mission + 1 < NMISSIONS;
             const char* i3[3] = { "RETRY", "NEXT MISSION", "BACK TO LOBBY" };
             const char* i2[2] = { "PLAY AGAIN", "BACK TO LOBBY" };
@@ -532,7 +690,12 @@ static void renderFrame(bool shotNow) {
     if (G.useTarget) SDL_SetRenderTarget(G.ren, G.target);
     SDL_SetRenderDrawColor(G.ren, 2, 4, 9, 255); SDL_RenderClear(G.ren);
     G.cv.glow = G.opt.glow; G.cv.px = G.H / 1080.f;
-    if (G.state == ST_GAME) { renderGame(G.cv); renderOverlay(G.cv); } else if (G.state == ST_ICON) renderIcon(G.cv); else if (G.state == ST_LOGO) { SDL_SetRenderDrawColor(G.ren, 0, 0, 0, 255); SDL_RenderClear(G.ren); renderLogoArt(G.cv); } else renderMenus(G.cv);
+    if (GS.on) {
+        if (G.state == ST_GAME) { if (GS.slot >= 0 && G.pl[GS.slot].joined) renderGame(G.cv); else renderSpectator(G.cv); renderOverlay(G.cv); renderGuestOverlay(G.cv); }
+        else if (G.state == ST_LOBBY || G.state == ST_MISSIONS) renderMenus(G.cv);
+        else renderNetScreen(G.cv);
+    } else if (G.state == ST_NET) renderNetScreen(G.cv);
+    else if (G.state == ST_GAME) { renderGame(G.cv); renderOverlay(G.cv); } else if (G.state == ST_ICON) renderIcon(G.cv); else if (G.state == ST_LOGO) { SDL_SetRenderDrawColor(G.ren, 0, 0, 0, 255); SDL_RenderClear(G.ren); renderLogoArt(G.cv); } else renderMenus(G.cv);
     if (shotNow && G.useTarget) saveShot();
     if (G.useTarget) {
         SDL_SetRenderTarget(G.ren, nullptr); SDL_SetRenderDrawColor(G.ren, 0, 0, 0, 255); SDL_RenderClear(G.ren);
@@ -593,7 +756,10 @@ static bool frame() {
             case SDL_CONTROLLERBUTTONDOWN: { Dev* p = devById(e.cbutton.which); int b = padButton(e.cbutton.button); if (p && b >= 0) p->hit[b] = true; break; }
             case SDL_MOUSEBUTTONDOWN: { Dev* k = devById(-1); if (k) { if (e.button.button == SDL_BUTTON_LEFT) k->click = true; else if (e.button.button == SDL_BUTTON_RIGHT) k->hit[B_B] = true; } break; }
             case SDL_MOUSEMOTION: { Dev* k = devById(-1); if (k) k->mouseMoved = true; break; }
-            case SDL_KEYDOWN: { Dev* k = devById(-1); if (k && !e.key.repeat) keyHit(*k, e.key.keysym.scancode, G.state == ST_GAME && !G.paused && !G.result); break; }
+            case SDL_KEYDOWN: {
+                if (G.state == ST_TEXT) { textKey(e.key.keysym.scancode); break; } // typing a name or code: keys are letters, not game buttons
+                Dev* k = devById(-1); if (k && !e.key.repeat) keyHit(*k, e.key.keysym.scancode, G.state == ST_GAME && !G.paused && !G.result); break; }
+            case SDL_TEXTINPUT: if (G.state == ST_TEXT) textType(e.text.text); break;
             case SDL_MOUSEWHEEL: { Dev* k = devById(-1); if (k) k->wheel += (float)e.wheel.y; break; }
             case SDL_WINDOWEVENT: if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) { setupTarget(); if (G.state == ST_GAME) layoutViews(); } break;
             }
@@ -613,12 +779,17 @@ static bool frame() {
         }
         if (dt > 0.1) dt = 0.1;
         fpsT += (float)dt; fpsN++; if (fpsT > 30) { printf("fps: %.1f (enemies %d, structures %d, particles %d)\n", fpsN / fpsT, (int)G.en.size(), (int)G.st.size(), (int)G.parts.size()); fpsT = 0; fpsN = 0; }
+        netHostRecv((float)dt); // online players' input arrives before this frame's game steps
+        // BC_HOSTWAIT=n (test): start the game from the lobby once n online players have joined; BC_HOSTCPU=1 lets the CPU play their seats
+        if (getenv("BC_HOSTWAIT") && G.state == ST_LOBBY) { int n = 0; for (auto& p : G.pl) if (p.joined && p.remote) n++; if (n >= atoi(getenv("BC_HOSTWAIT"))) { startGame(); if (getenv("BC_HOSTCPU")) for (auto& p : G.pl) if (p.remote) p.cpu = true; } }
+        if (G.state == ST_JOIN) lanListen((float)dt);
         readDevs((float)dt, G.state == ST_GAME && !G.paused && !G.result);
         // BACK + START anywhere returns to the title (Batocera's HOTKEY + START exits the game)
-        for (auto& d : G.devs) if (d.id != -1 && d.b[B_BACK] && d.b[B_START] && (pr(d, B_START) || pr(d, B_BACK))) { if (G.state == ST_GAME) { G.state = ST_TITLE; G.menuSel = 0; G.paused = false; } }
-        if (G.state == ST_GAME) {
+        if (!GS.on) for (auto& d : G.devs) if (d.id != -1 && !d.remote && d.b[B_BACK] && d.b[B_START] && (pr(d, B_START) || pr(d, B_BACK))) { if (G.state == ST_GAME) { G.state = ST_TITLE; G.menuSel = 0; G.paused = false; } }
+        if (GS.on) { G.stateT += (float)dt; guestUpdate((float)dt); }
+        else if (G.state == ST_GAME) {
             if (G.paused || G.result) { updateOverlay((float)dt); usePresses(); }
-            if (!G.paused && !G.result) for (auto& p : G.pl) if (p.joined && !p.cpu && !p.devLost) { Dev* d = devById(p.dev); if (d && pr(*d, B_START) && !d->b[B_BACK]) { G.paused = true; G.pauseSel = 0; G.pauser = p.idx; AU.play(SND_UI_OK, 0.6f); usePresses(); break; } }
+            if (!G.paused && !G.result) for (auto& p : G.pl) if (p.joined && !p.cpu && !p.devLost && !p.remote) { Dev* d = devById(p.dev); if (d && pr(*d, B_START) && !d->b[B_BACK]) { G.paused = true; G.pauseSel = 0; G.pauser = p.idx; AU.play(SND_UI_OK, 0.6f); usePresses(); break; } }
             if (!G.paused) {
                 acc += dt;
                 while (acc >= 1 / 60.0) {
@@ -628,11 +799,12 @@ static bool frame() {
                 }
             }
         } else { updateMenus((float)dt); usePresses(); }
+        netHostSend((float)dt);
         G.frame++;
         static int benchN = getenv("BC_FRAMES") ? atoi(getenv("BC_FRAMES")) : 0; static Uint64 benchT0 = 0;
         if (benchN && G.frame == 10) benchT0 = SDL_GetPerformanceCounter();
         if (benchN && G.frame == 10 + benchN) { double s = (double)(SDL_GetPerformanceCounter() - benchT0) / SDL_GetPerformanceFrequency(); printf("bench: %d frames in %.2fs = %.1f fps\n", benchN, s, benchN / s); G.quit = true; }
-        { static int shown = -1; int want = !(G.state == ST_GAME && !G.paused && !G.result) && G.state != ST_ICON && G.state != ST_LOGO;
+        { static int shown = -1; int want = (!(G.state == ST_GAME && !G.paused && !G.result) || GS.leaveAsk) && G.state != ST_ICON && G.state != ST_LOGO;
           if (want != shown) { SDL_ShowCursor(want ? SDL_ENABLE : SDL_DISABLE); shown = want; } }
         bool shot = G.shotFrame >= 0 && G.frame == G.shotFrame;
         renderFrame(shot);
@@ -641,17 +813,21 @@ static bool frame() {
     return true;
 }
 
-int main(int argc, char** argv) {
-    (void)argc; (void)argv;
+static int gameMain() {
     setvbuf(stdout, nullptr, _IOLBF, 0);
+#ifdef __EMSCRIPTEN__
+    SDL_SetMainReady();
+#endif
     printf("Belt Command starting\n");
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) { printf("SDL_Init failed: %s\n", SDL_GetError()); return 1; }
     SDL_version lv; SDL_GetVersion(&lv); printf("sdl: %d.%d.%d, video driver %s\n", lv.major, lv.minor, lv.patch, SDL_GetCurrentVideoDriver());
     const char* home = getenv("BC_HOME"); char* base = SDL_GetBasePath();
-    G.cfgPath = std::string(home ? home : (base ? base : "./")) + (home ? "/" : "") + "beltcommand.cfg"; if (base) SDL_free(base);
+    GAMEDIR = home ? home : (base ? base : "."); while (GAMEDIR.size() > 1 && GAMEDIR.back() == '/') GAMEDIR.pop_back();
+    G.cfgPath = GAMEDIR + "/beltcommand.cfg"; if (base) SDL_free(base);
     loadCfg();
+    if (G.opt.token.empty()) { G.opt.token = randomToken(); saveCfg(); }
     if (getenv("BC_SHOT")) G.shotFrame = atoi(getenv("BC_SHOT"));
     if (getenv("BC_SHOT_PATH")) G.shotPath = getenv("BC_SHOT_PATH");
     if (getenv("BC_BOTS")) G.bots = true;
@@ -674,17 +850,30 @@ int main(int argc, char** argv) {
     if (!getenv("BC_MUTE")) AU.open();
     applyAudioVol();
     Dev kb; kb.id = -1; kb.name = "KEYBOARD"; G.devs.push_back(kb);
+    netStart();
     testSetup();
+    autoJoin();
     LOOP.last = SDL_GetPerformanceCounter();
 #ifdef __EMSCRIPTEN__
-    emscripten_set_main_loop([] { frame(); }, 0, 1); // the browser calls frame() once per display refresh
+    emscripten_set_main_loop([] { frame(); }, 0, 0); // the browser calls frame() once per display refresh
+    return 0;
 #else
     while (!G.quit && frame()) {}
 #endif
     saveCfg();
+    if (GS.on) linkClose();
+    netShutdown();
     AU.close();
     SDL_DestroyRenderer(G.ren); SDL_DestroyWindow(G.win); SDL_Quit();
     printf("Belt Command exit\n");
     return 0;
 }
 
+#ifdef __EMSCRIPTEN__
+// The page starts the game by calling bc_main() once the runtime is ready (web/shell.html). Some Emscripten builds
+// (Ubuntu's 3.1.6 package with clang 15) never export main(), so the game does not rely on it.
+extern "C" EMSCRIPTEN_KEEPALIVE int bc_main() { static bool started = false; if (started) return 0; started = true; return gameMain(); }
+int main() { return 0; }
+#else
+int main(int argc, char** argv) { (void)argc; (void)argv; return gameMain(); }
+#endif

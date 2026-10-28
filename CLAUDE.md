@@ -14,7 +14,10 @@ drawn in code and all sound is synthesized. `README.md` has modes, structures, c
 - Native test build: `./build.sh native` -> `build/bc_test` (needs `libsdl2-dev`).
 - Batocera release: `./build.sh` -> `build/beltcommand.x86_64` (zig c++, glibc 2.28, links the box's libSDL2).
 - Web: `source emsdk_env.sh && ./web/build.sh` -> `web/dist` (committed; Vercel serves it as-is, no build step).
-  If GitHub zip downloads are blocked: clone SDL tag `release-2.32.10`, set `EMCC_LOCAL_PORTS="sdl2=/path/to/SDL"`.
+  If GitHub zip downloads are blocked: clone the SDL tag your Emscripten wants, set `EMCC_LOCAL_PORTS="sdl2=/path/to/SDL"`.
+  Without emsdk: Ubuntu's `apt-get install emscripten` (3.1.6) works with a config copy (`FROZEN_CACHE = False`, `NODE_JS` = your node,
+  `EM_CONFIG=` that copy) and SDL `release-2.0.20`. That package never exports `main()`, so the page starts the game through
+  `bc_main()` (see the end of `src/ui.inc` and `web/shell.html`).
 
 ## Test headless
 ```
@@ -27,6 +30,9 @@ Playwright + headless Chromium (`--use-angle=swiftshader`).
 ## Deploy (web)
 Vercel project `belt-command`, team RosenauProductions, root `web/dist`. Production follows `main`.
 
-## In progress
-Online multiplayer (local + internet, Batocera hosting, browser guests): see `docs/ONLINE_MULTIPLAYER_HANDOVER.md`.
+## Online play
+Built 28 Oct 2026 in `src/net.inc` (host server, snapshots, guest client, LAN list, tunnel) plus join/keyboard screens in `src/ui.inc`.
+README "Online play" has how to use it; `docs/ONLINE_MULTIPLAYER_HANDOVER.md` the design. Bump `NET_PROTO` whenever the
+snapshot or input format changes, and ship the box build and the Vercel build together (they must match).
+Test: native host + `BC_JOIN` guest, or Playwright on `http://127.0.0.1:8095/#join` with the web files in `$BC_HOME/web`.
 Wii U port: on hold, `docs/WIIU_PLAN.md`.

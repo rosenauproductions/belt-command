@@ -79,6 +79,8 @@ Copy to the share (`/userdata/roms/ports`):
 - `batocera/images/*.png` to `ports/images/`
 - the `<game>` block in `batocera/gamelist-entry.xml` into `ports/gamelist.xml` (back it up first; edit with EmulationStation closed)
 
+For online play also copy `web/dist/index.html`, `index.js`, `index.wasm`, `icon.png` to `ports/beltcommand/web/`, and Cloudflare's `cloudflared-linux-amd64` to `ports/beltcommand/cloudflared` (internet play only).
+
 `dist-beta/beltcommand_beta.x86_64` is the latest test build, committed so it can be copied to the box without building. Install it next to the main binary (or in place of it) only once it has been tried.
 
 The launcher logs to `/userdata/system/logs/beltcommand.log`. Settings are saved in `ports/beltcommand/beltcommand.cfg`.
@@ -102,6 +104,23 @@ Lobby: A joins each controller, left/right picks the mode, X/Y add or remove CPU
 
 Keyboard + mouse: the mouse points (no edge scrolling), WASD or arrows scroll the map, Space or left-click to build, click a build icon to choose it, Q/E or 1-9, 0 to choose, U upgrade, hold R recycle, Backspace or right-click ping, wheel or -/= zoom, Tab map, Esc pause.
 
+## Online play
+
+The Batocera box hosts; anyone can join from a browser (the Vercel site or the page the box serves itself) or from another box running Belt Command. Couch players on the box and online players share the same game, up to 4 seats in total.
+
+| On the host (the box) | |
+|---|---|
+| Same Wi-Fi | The lobby shows `http://<box-ip>:8095` and a QR code. Friends open it in a browser and type a name. |
+| Internet | Press BACK (Tab) in the lobby. The box starts `cloudflared` (next to the game) and shows a code plus a QR for `https://belt-command.vercel.app/#join=<code>`. Press BACK again to close the link. |
+| Seats | Online players take free seats in the lobby and show as `NAME` / `ONLINE`. Only the host changes the mode, adds CPUs and starts. Guests who arrive mid-game watch until the next round. A guest who drops mid-game is played by a CPU and gets the seat back on reconnecting. |
+
+| On a guest | |
+|---|---|
+| Browser | Open the link (or JOIN GAME on belt-command.vercel.app and type the code). Keyboard + mouse or a gamepad; the guest plays full screen. START opens LEAVE GAME. |
+| Another box | Title > JOIN GAME lists games on the same network, or ENTER CODE OR ADDRESS for an internet code or an IP. |
+
+How it works: the host runs the only real game. Guests send their buttons, cursor and selected structure about 30 times a second; the host sends snapshots (structures that changed, everything that moves, teams, links) and effect events (explosions, beams, sounds) about 15 times a second, about 3-17 KB/s per guest in tests. The box serves the browser build from `ports/beltcommand/web/`. Internet guests connect through a Cloudflare quick tunnel (no account needed); a box joining over the internet uses the system's OpenSSL for the secure link. Port 8095 (TCP) for the game, 8096 (UDP) for the LAN game list. Host and guests must run the same version (`NET_PROTO` in `src/net.inc`).
+
 ## Testing without a screen
 
 Run under `xvfb-run` with these environment variables:
@@ -119,10 +138,16 @@ Run under `xvfb-run` with these environment variables:
 | `BC_SHOT=frame`, `BC_SHOT_PATH=file.bmp` | Save a screenshot and exit |
 | `BC_FRAMES=n` | Print a frame-rate benchmark and exit |
 | `BC_WINDOW=WxH`, `BC_RES=0-4`, `BC_GLOW=0\|1`, `BC_MUTE=1` | Window, render resolution, glow, sound |
+| `BC_JOIN=host:port\|code\|wss://...`, `BC_NAME=x` | Native build joins that game as a guest at start |
+| `BC_HOSTWAIT=n`, `BC_HOSTCPU=1` | Host starts the game from the lobby once n online players joined; the CPU plays their seats |
+| `BC_GUESTBOT=1` | A guest builds something near its command every second |
+| `BC_PORT=n`, `BC_NOSERVER=1`, `BC_TUNNEL=1`, `BC_HOME=dir` | Game port, no server (for a second copy on one machine), open the internet link at start, game/settings folder |
 
 Example: `BC_MUTE=1 SDL_AUDIODRIVER=dummy BC_WINDOW=1920x1080 BC_STATE=game BC_MODE=endless BC_BOTS=1 BC_PLAYERS=4 BC_ADVANCE=300 BC_SHOT=10 BC_SHOT_PATH=shot.bmp xvfb-run -a -s "-screen 0 1920x1080x24" build/bc_test`
 
 ## Status
+
+- 28 Oct 2026: online multiplayer. The box hosts (LAN link + QR, internet code through a Cloudflare quick tunnel); browsers and other boxes join, with names in the lobby, guest screens that follow the host, drop-and-rejoin, and a JOIN GAME menu with a LAN game list and an on-screen keyboard. Tested in the cloud: box host with native guests (plain and TLS) and browser guests in headless Chromium, a 3-minute 4-player soak, reconnect, and the pad input test (100 of 100). Not yet tried: the Cloudflare tunnel itself (the cloud workspace can't reach it), and real play on the box.
 
 - 26 Oct 2026: browser version live at https://belt-command.vercel.app. Mouse points (no edge scrolling), WASD scrolls, mouse works in menus. A multipath (web) network was tried and reverted: it made bases too hard to cut off and raids stalled. Online multiplayer is planned in `docs/ONLINE_MULTIPLAYER_HANDOVER.md`.
 

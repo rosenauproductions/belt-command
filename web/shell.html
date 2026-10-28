@@ -40,7 +40,7 @@
     locateFile: function (f) { return f + '?v=__BUILD__'; }, // new build = new URL, so a cached old index.wasm is never used
     print: function (t) { console.log(t); },
     printErr: function (t) { console.warn(t); },
-    onRuntimeInitialized: function () { cover.classList.remove('loading'); go.textContent = 'CLICK TO PLAY'; }
+    onRuntimeInitialized: function () { cover.classList.remove('loading'); go.textContent = 'CLICK TO PLAY'; if (Module._bc_main) Module._bc_main(); }
   };
   function wake() { // browsers only allow sound after a click or key press
     try { if (Module.SDL2 && Module.SDL2.audioContext && Module.SDL2.audioContext.state !== 'running') Module.SDL2.audioContext.resume(); } catch (e) {}

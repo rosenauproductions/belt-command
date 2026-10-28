@@ -16,8 +16,7 @@ static void discoverCrystal(int team) {
     }
     for (auto& a : G.ast) if (!a.dead && a.crystal > 0) ring(a.p, a.r * 0.5f, a.r * 1.4f, withA(C_CRY, 0.7f), 0.8f);
     for (auto& q : G.pl) if (q.joined && q.team == team) toast(q, first ? "NEW MINERAL: CRYSTAL - ALL ASTEROIDS REFRESHED" : "CRYSTAL FOUND - MINE IT FOR 1.5X");
-    bool human = false; for (auto& q : G.pl) if (q.joined && q.team == team && !q.cpu) human = true;
-    if (human) AU.play(SND_WIN, 0.5f);
+    teamSound(SND_WIN, 0.5f, team);
     printf("research: team %d found crystal at %.0fs%s\n", team, G.time, first ? " (belt refreshed)" : "");
 }
 
@@ -81,7 +80,7 @@ static int hoverAt(int team, V2 p, bool anyTeam) {
 static bool tryBuild(Player& p, int t, V2 q, bool quiet) {
     const char* why = canPlace(p.team, t, q);
     if (why) {
-        if (!quiet) { if (std::string(why) == "NOT ENOUGH MINERALS") toast(p, "NEED " + std::to_string(SD[t].cost) + " MINERALS"); else toast(p, why); AU.play(SND_ERR, 0.6f); }
+        if (!quiet) { if (std::string(why) == "NOT ENOUGH MINERALS") toast(p, "NEED " + std::to_string(SD[t].cost) + " MINERALS"); else toast(p, why); pSound(p, SND_ERR, 0.6f); }
         return false;
     }
     Team& T = G.teams[p.team]; T.minerals -= SD[t].cost; T.built++;
@@ -95,10 +94,10 @@ static bool tryUpgrade(Player& p, int id, bool quiet) {
     if (id < 0) return false;
     Struct& s = G.st[id]; Team& T = G.teams[p.team];
     if (s.dead || s.team != p.team) return false;
-    if (s.built < 1) { if (!quiet) { toast(p, "STILL BUILDING"); AU.play(SND_ERR, 0.5f); } return false; }
-    if (s.lv >= 3) { if (!quiet) { toast(p, "MAX LEVEL"); AU.play(SND_ERR, 0.5f); } return false; }
+    if (s.built < 1) { if (!quiet) { toast(p, "STILL BUILDING"); pSound(p, SND_ERR, 0.5f); } return false; }
+    if (s.lv >= 3) { if (!quiet) { toast(p, "MAX LEVEL"); pSound(p, SND_ERR, 0.5f); } return false; }
     int c = upgCost(s.t, s.lv);
-    if (T.minerals < c) { if (!quiet) { toast(p, "NEED " + std::to_string(c) + " MINERALS"); AU.play(SND_ERR, 0.5f); } return false; }
+    if (T.minerals < c) { if (!quiet) { toast(p, "NEED " + std::to_string(c) + " MINERALS"); pSound(p, SND_ERR, 0.5f); } return false; }
     T.minerals -= c; s.invested += c; s.lv++;
     float nm = SD[s.t].hp * lvm(s.lv); s.hp += nm - s.maxhp; s.maxhp = nm;
     ring(s.p, s.r(), s.r() + 30, C_WHITE, 0.4f); sparks(s.p, 12, T.col, 120);
@@ -152,7 +151,7 @@ static void startWaveWarnings() {
     float budget = (5 + w * 4.2f + w * w * 0.15f) * G.M.diff * scale;
     int npts = budget > 40 ? 3 : budget > 18 ? 2 : 1;
     for (int i = 0; i < npts; i++) G.warns.push_back({ edgePoint(), 6.0f, budget / npts, false });
-    AU.play(SND_ALERT, 0.55f); G.alertT = 2.5f;
+    teamSound(SND_ALERT, 0.55f, -1); G.alertT = 2.5f;
 }
 
 // ---------------------------------------------------------------- world update
@@ -227,7 +226,7 @@ static void updateStructs(float dt) {
                 if (!spend(T, 4)) break;
                 s.cd = 0.5f; s.beamT = 0.1f;
                 V2 muzzle = s.p + fromAng(s.aim) * 22;
-                G.beams.push_back({ muzzle, tp, 0.12f, 0.12f, 2.2f, T.col });
+                addBeam(muzzle, tp, 0.12f, 2.2f, T.col);
                 sparks(tp, 3, T.col, 90); sfxAt(SND_LASER, s.p, 0.35f, 45);
                 if (eIdx >= 0) damageEnemy(G.en[eIdx], 9 * m, s.team); else if (fIdx >= 0) damageFighter(G.fi[fIdx], 9 * m, s.team); else damageStruct(sIdx, 9 * m * 0.7f, s.p, s.team);
             } else {
@@ -252,7 +251,7 @@ static void updateStructs(float dt) {
                 float amt = 12 * m * 0.3f;
                 if (!spend(T, amt * 0.25f)) break;
                 Struct& o = G.st[bi]; o.hp = std::min(o.maxhp, o.hp + amt); first = bi;
-                G.beams.push_back({ s.p, o.p, 0.25f, 0.25f, 1.4f, C_GOOD });
+                addBeam(s.p, o.p, 0.25f, 1.4f, C_GOOD);
             }
             break;
         }
@@ -353,8 +352,7 @@ static void markFound(int t, int o) {
     if (!raid() || t == o || t < 0 || o < 0 || (G.teams[t].found >> o & 1)) return;
     G.teams[t].found |= 1u << o;
     for (auto& q : G.pl) if (q.joined && q.team == t) { toast(q, "RIVAL BASE FOUND - P" + std::to_string(o + 1)); }
-    bool human = false; for (auto& q : G.pl) if (q.joined && q.team == t && !q.cpu) human = true;
-    if (human) AU.play(SND_ALERT, 0.5f);
+    teamSound(SND_ALERT, 0.5f, t);
     printf("raid: team %d found team %d at %.0fs\n", t, o, G.time);
 }
 static void updateSight(float dt) {
@@ -421,7 +419,7 @@ static void updateFighters(float dt) {
             if (dTo < FTR_RANGE + tr && f.cd <= 0 && std::fabs(angDiff(f.ang, face)) < 0.9f) {
                 f.cd = FTR_CD * R.range(0.85f, 1.15f);
                 V2 hit = tp - dir * tr * 0.7f;
-                G.beams.push_back({ f.p + fromAng(f.ang) * 8, hit, 0.09f, 0.09f, 1.5f, T.col });
+                addBeam(f.p + fromAng(f.ang) * 8, hit, 0.09f, 1.5f, T.col);
                 sparks(hit, 2, T.col, 70); sfxAt(SND_LASER, f.p, 0.18f, 70);
                 float dmg = f.dmg * ftrPower();
                 if (f.tk == 1) { Enemy* e = enemyByUid(f.tid); if (e) damageEnemy(*e, dmg, f.team); }
@@ -496,7 +494,7 @@ static void updateFx(float dt) {
 }
 static void updateWaves(float dt) {
     if (G.M.obj == OBJ_MOTHER && !G.motherWarned && G.time >= G.M.target - 10) {
-        G.motherWarned = true; G.warns.push_back({ edgePoint(), 10, 0, true }); AU.play(SND_ALERT, 0.8f); G.alertT = 4;
+        G.motherWarned = true; G.warns.push_back({ edgePoint(), 10, 0, true }); teamSound(SND_ALERT, 0.8f, -1); G.alertT = 4;
     }
     G.waveT -= dt;
     if (G.waveT <= 6 && G.waveT + dt > 6) startWaveWarnings();
@@ -659,7 +657,7 @@ static void startGame() {
     G.M = G.mode == MODE_RAID ? M_RAID : G.mode == MODE_VERSUS ? M_VERSUS : G.mode == MODE_ENDLESS ? M_ENDLESS : MISSIONS[G.mission];
     G.st.clear(); G.en.clear(); G.bl.clear(); G.parts.clear(); G.beams.clear(); G.warns.clear(); G.pings.clear(); G.fi.clear(); G.seeT = 0; G.crystalOut = false;
     G.time = 0; G.waveN = 0; G.waveT = G.M.first; G.motherUid = -1; G.motherWarned = G.motherSpawned = false;
-    G.result = 0; G.paused = false; G.uidNext = 1;
+    G.result = 0; G.paused = false; G.uidNext = 1; G.gameId++;
     for (auto& t : G.teams) t = Team();
     R.s = (uint32_t)(SDL_GetTicks() * 2654435761u) | 1;
     if (getenv("BC_SEED")) R.s = (uint32_t)atoi(getenv("BC_SEED")) | 1;

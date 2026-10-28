@@ -1,8 +1,12 @@
 # Online multiplayer: handover
 
 Written 26 Oct 2026 by the cloud Claude session that built the Carrier, Research, Raid mode, input fixes and the
-browser port. Chris wants his Mac Claude (Claude Desktop) to implement online play from this document.
-Nothing here is built yet. Read `README.md` and `CLAUDE.md` first.
+browser port. **Built 28 Oct 2026** (steps 1-3) following this plan: `src/net.inc`, README "Online play". Step 4
+(hosting from a browser) is still open; Chris chose "box hosts, anyone joins" for now.
+
+What changed from the plan: port 8095 (TCP) and 8096 (UDP LAN beacon); positions quantized to 1/4 unit as int16;
+structure and asteroid records are resent only when their bytes change; links only when the tree changes; beams travel
+as events (`addBeam`); a native box joins over the internet with TLS from the system's libssl, loaded with dlopen.
 
 ## What Chris asked for (his words, tidied)
 
