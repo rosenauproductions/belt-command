@@ -8,7 +8,7 @@ struct View {
 };
 static float viewScale(const Player& p) { return p.vp.h / 900.f * p.zoom * (p.vp.h < G.H * 0.75f ? 1.25f : 1.0f); }
 static View viewOf(const Player& p) { View v; v.vp = p.vp; v.cam = p.cam; v.s = viewScale(p); if (p.shake > 0.1f) v.cam += V2(R.range(-1, 1), R.range(-1, 1)) * p.shake / v.s * G.cv.px; return v; }
-static float hudU(const SDL_Rect& vp) { return G.H / 1080.f * (vp.h < G.H * 0.75f ? 0.62f : 1.0f); }
+static float hudU(const SDL_Rect& vp) { float u = G.H / 1080.f * (vp.h < G.H * 0.75f ? 0.62f : 1.0f); return TC.on && vp.h >= G.H * 0.75f ? std::max(u, 46 * TC.dpr / 66) : u; } // touch: build icons at least 46 CSS px
 
 static uint32_t hash3(int a, int b, int c) { uint32_t h = (uint32_t)a * 73856093u ^ (uint32_t)b * 19349663u ^ (uint32_t)c * 83492791u; h ^= h >> 13; h *= 0x5bd1e995; h ^= h >> 15; return h; }
 static void drawStars(Canvas& cv, const View& v, float timeScroll = 0) {
@@ -297,6 +297,9 @@ static void drawWorld(Canvas& cv, const View& v, const Player* me) {
 static void drawCursorAndGhost(Canvas& cv, const View& v, const Player& p, bool isMe) {
     float k = v.s, lw = std::max(1.2f, 1.8f * G.cv.px * (isMe ? 1 : 0.8f));
     V2 c = v.w2s(p.cur);
+    bool touchMe = isMe && TC.on && touchPlayerIs(p);
+    if (touchMe && TC.mode == 0) return; // touch: nothing placed yet, no cursor
+    if (touchMe && TC.mode == 2) { float rr = 40 * k + 10 * G.cv.px; cv.circle(c, rr, lw * 1.4f, withA(p.col, 0.6f + 0.4f * std::sin(G.time * 6)), 0.8f); return; }
     if (isMe && p.hover < 0 && !p.bigMap) {
         int t = BUILDS[p.sel];
         const char* why = canPlace(p.team, t, p.cur);
@@ -344,6 +347,7 @@ static std::string mmss(float t) { int s = (int)t; char b[16]; snprintf(b, sizeo
 // Button label for prompts, matching the device (Xbox letters, Nintendo letters by position, keyboard keys)
 static const char* btnLab(int devId, int b) {
     const Dev* d = nullptr; for (auto& x : G.devs) if (x.id == devId) d = &x;
+    if (devId == -1 && TC.on) return "TAP"; // touch: the buttons say what they do
     if (devId == -1) { switch (b) { case B_A: return "SPACE"; case B_B: return "BKSP"; case B_X: return "U"; case B_Y: return "R"; case B_LB: return "Q"; case B_RB: return "E"; case B_START: return "ESC"; case B_BACK: return "TAB"; } return "?"; }
     bool nin = d && d->nintendo;
     switch (b) { case B_A: return nin ? "B" : "A"; case B_B: return nin ? "A" : "B"; case B_X: return nin ? "Y" : "X"; case B_Y: return nin ? "X" : "Y"; case B_LB: return nin ? "L" : "LB"; case B_RB: return nin ? "R" : "RB"; case B_START: return nin ? "+" : "START"; case B_BACK: return nin ? "-" : "BACK"; }
@@ -359,7 +363,7 @@ static Bar barOf(const SDL_Rect& vp) {
 }
 static int barSlotAt(const SDL_Rect& vp, V2 m) {
     Bar b = barOf(vp); if (m.y < b.sy || m.y > b.sy + b.slot) return -1;
-    for (int i = 0; i < NBUILD; i++) { float x = b.sx + i * (b.slot + b.gap); if (m.x >= x && m.x <= x + b.slot) return i; }
+    for (int i = 0; i < NBUILD; i++) { float x = b.sx + i * (b.slot + b.gap); if (m.x >= x - b.gap / 2 && m.x <= x + b.slot + b.gap / 2) return i; } // gaps count (fingers are wide)
     return -1;
 }
 
@@ -413,8 +417,10 @@ static void drawHud(Canvas& cv, Player& p) {
     // minimap
     float mw = std::min(vp.w * 0.2f, 300 * u * 1.3f); float mh = mw * G.WH / G.WW;
     drawObjective(cv, p, u, x + 290 * u, vp.x + vp.w - mw - 24 * u);
-    if (p.bigMap) { mw = vp.w * 0.86f; mh = mw * G.WH / G.WW; if (mh > vp.h * 0.8f) { mh = vp.h * 0.8f; mw = mh * G.WW / G.WH; } drawMinimap(cv, vp.x + (vp.w - mw) / 2, vp.y + (vp.h - mh) / 2, mw, &p, u * 1.4f); }
-    else drawMinimap(cv, vp.x + vp.w - mw - 14 * u, vp.y + 14 * u, mw, &p, u);
+    float mapx, mapy;
+    if (p.bigMap) { mw = vp.w * 0.86f; mh = mw * G.WH / G.WW; if (mh > vp.h * 0.8f) { mh = vp.h * 0.8f; mw = mh * G.WW / G.WH; } mapx = vp.x + (vp.w - mw) / 2; mapy = vp.y + (vp.h - mh) / 2; drawMinimap(cv, mapx, mapy, mw, &p, u * 1.4f); }
+    else { mapx = vp.x + vp.w - mw - 14 * u; mapy = vp.y + 14 * u; drawMinimap(cv, mapx, mapy, mw, &p, u); }
+    if (touchPlayerIs(p)) { TC.mx = mapx; TC.my = mapy; TC.mw = mw; TC.mh = mw * G.WH / G.WW; TC.mapBig = p.bigMap; TC.mapFrame = G.frame; }
     // off-screen threat arrows
     View v = viewOf(p); V2 cen(vp.x + vp.w * 0.5f, vp.y + vp.h * 0.5f);
     auto edgeArrow = [&](V2 w, Col c, float sz) {
@@ -448,7 +454,8 @@ static void drawHud(Canvas& cv, Player& p) {
     snprintf(buf, sizeof buf, "%s - %s", SD[t].name, SD[t].blurb);
     FONT.draw(cv, buf, V2(vp.x + vp.w * 0.5f, sy - 22 * u), 14 * u, withA(C_WHITE, 0.9f), 1);
     char hint[200];
-    if (p.dev == -9) snprintf(hint, sizeof hint, "CPU");
+    if (TC.on && touchPlayerIs(p)) snprintf(hint, sizeof hint, "DRAG MOVE   PINCH ZOOM   TAP AN ICON, TAP THE MAP TO PLACE, TAP AGAIN TO BUILD   TAP A STRUCTURE FOR MORE");
+    else if (p.dev == -9) snprintf(hint, sizeof hint, "CPU");
     else if (p.dev == -1) snprintf(hint, sizeof hint, raid() ? "WASD SCROLL   CLICK BUILD   CLICK ICON OR 1-0 PICK   U UPGRADE   HOLD R RECYCLE   RIGHT-CLICK ATTACK   TAB MAP" : "WASD SCROLL   CLICK BUILD   CLICK ICON OR 1-0 PICK   U UPGRADE   HOLD R RECYCLE   RIGHT-CLICK PING   TAB MAP");
     else snprintf(hint, sizeof hint, raid() ? "%s/%s SELECT   %s BUILD   %s UPGRADE   HOLD %s RECYCLE   %s PING / ATTACK   %s MAP" : "%s/%s SELECT   %s BUILD   %s UPGRADE   HOLD %s RECYCLE   %s PING   %s MAP", btnLab(p.dev, B_LB), btnLab(p.dev, B_RB), btnLab(p.dev, B_A), btnLab(p.dev, B_X), btnLab(p.dev, B_Y), btnLab(p.dev, B_B), btnLab(p.dev, B_BACK));
     float hs = std::min(11 * u, vp.w * 0.95f / std::max(1.f, (float)strlen(hint)));
@@ -457,6 +464,7 @@ static void drawHud(Canvas& cv, Player& p) {
     if (p.hover >= 0) {
         const Struct& s = G.st[p.hover]; bool own = s.team == p.team;
         float pw = 300 * u, ph = 112 * u, px = vp.x + vp.w - pw - 14 * u, py = sy - ph - 44 * u;
+        if (TC.on && touchPlayerIs(p)) { px = TC.hudX - pw - 12 * u; py = sy - ph - 14 * u; } // left of the touch buttons
         cv.rect(px, py, pw, ph, Col(5, 8, 14, 215)); cv.rectLine(px, py, pw, ph, 1.2f * u, withA(G.teams[s.team].col, 0.7f), 0.3f);
         snprintf(buf, sizeof buf, "%s  LV %d", SD[s.t].name, s.lv); FONT.draw(cv, buf, V2(px + 12 * u, py + 10 * u), 17 * u, G.teams[s.team].col);
         snprintf(buf, sizeof buf, "HP %d/%d", (int)s.hp, (int)s.maxhp); FONT.draw(cv, buf, V2(px + 12 * u, py + 36 * u), 12 * u, C_WHITE);
@@ -467,12 +475,14 @@ static void drawHud(Canvas& cv, Player& p) {
         FONT.draw(cv, stt, V2(px + pw - 12 * u, py + 36 * u), 12 * u, !s.powered && s.built >= 1 ? C_BAD : C_GOOD, 2);
         if (own) {
             char l1[64], l2[64];
-            if (s.lv < 3 && s.built >= 1) snprintf(l1, sizeof l1, "%s UPGRADE  %d", btnLab(p.dev, B_X), upgCost(s.t, s.lv)); else snprintf(l1, sizeof l1, s.lv >= 3 ? "MAX LEVEL" : "UPGRADE AFTER BUILD");
+            bool tch = TC.on && touchPlayerIs(p);
+            if (s.lv < 3 && s.built >= 1) snprintf(l1, sizeof l1, tch ? "%sUPGRADE  %d" : "%s UPGRADE  %d", tch ? "" : btnLab(p.dev, B_X), upgCost(s.t, s.lv)); else snprintf(l1, sizeof l1, s.lv >= 3 ? "MAX LEVEL" : "UPGRADE AFTER BUILD");
             FONT.draw(cv, l1, V2(px + 12 * u, py + 60 * u), 12 * u, s.lv < 3 && s.built >= 1 && T.minerals >= upgCost(s.t, s.lv) ? C_MIN : C_DIM);
-            if (s.t != S_HQ) { snprintf(l2, sizeof l2, "HOLD %s RECYCLE  +%d", btnLab(p.dev, B_Y), (int)recycleValue(s)); FONT.draw(cv, l2, V2(px + 12 * u, py + 84 * u), 12 * u, withA(C_WHITE, 0.7f)); }
+            if (s.t != S_HQ) { if (tch) snprintf(l2, sizeof l2, "RECYCLE  +%d", (int)recycleValue(s)); else snprintf(l2, sizeof l2, "HOLD %s RECYCLE  +%d", btnLab(p.dev, B_Y), (int)recycleValue(s)); FONT.draw(cv, l2, V2(px + 12 * u, py + 84 * u), 12 * u, withA(C_WHITE, 0.7f)); }
         } else { FONT.draw(cv, "RIVAL STRUCTURE", V2(px + 12 * u, py + 60 * u), 12 * u, C_BAD);
-            if (raid()) { snprintf(buf, sizeof buf, "%s SEND FIGHTERS HERE", btnLab(p.dev, B_B)); FONT.draw(cv, buf, V2(px + 12 * u, py + 84 * u), 12 * u, withA(C_WHITE, 0.7f)); } }
+            if (raid()) { snprintf(buf, sizeof buf, TC.on && touchPlayerIs(p) ? "%sATTACK SENDS FIGHTERS" : "%s SEND FIGHTERS HERE", TC.on && touchPlayerIs(p) ? "" : btnLab(p.dev, B_B)); FONT.draw(cv, buf, V2(px + 12 * u, py + 84 * u), 12 * u, withA(C_WHITE, 0.7f)); } }
     }
+    if (TC.on && touchPlayerIs(p)) drawTouchUi(cv, p, u, sy);
     if (p.toastT > 0) FONT.draw(cv, p.toast.c_str(), V2(vp.x + vp.w * 0.5f, sy - 52 * u), 18 * u, withA(Col(255, 210, 120), std::min(1.f, p.toastT * 2)), 1);
     if (!T.alive && rivals()) FONT.draw(cv, "COMMAND LOST", V2(vp.x + vp.w * 0.5f, vp.y + vp.h * 0.4f), 46 * u, withA(C_BAD, 0.9f), 1);
     if (p.devLost) FONT.draw(cv, "CONTROLLER DISCONNECTED", V2(vp.x + vp.w * 0.5f, vp.y + vp.h * 0.5f), 26 * u, C_BAD, 1);

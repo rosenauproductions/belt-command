@@ -66,7 +66,9 @@ source /path/to/emsdk/emsdk_env.sh
 ./web/build.sh        # -> web/dist (index.html, index.js, index.wasm, icon.png)
 ```
 
-`web/dist` is committed, so Vercel serves it as static files with no build step (project root directory `web/dist`). Keyboard + mouse is player 1; gamepads join as on Batocera. Settings are kept in the browser's localStorage. Sound starts after the first click (browser rule). There is no touch control yet.
+`web/dist` is committed, so Vercel serves it as static files with no build step (project root directory `web/dist`). Keyboard + mouse (or touch) is player 1; gamepads join as on Batocera. Settings are kept in the browser's localStorage. Sound starts after the first click or tap (browser rule).
+
+Phones and tablets: landscape only (portrait shows a "turn your phone" screen), full screen on the first tap where the browser allows it (not on iPhone). Touch controls are under Controls. PeerJS (`web/peerjs.min.js`, MIT, version 1.5.5) is copied into `web/dist` by the build for browser-to-browser play.
 
 Wii U: see `docs/WIIU_PLAN.md` (on hold).
 
@@ -79,7 +81,7 @@ Copy to the share (`/userdata/roms/ports`):
 - `batocera/images/*.png` to `ports/images/`
 - the `<game>` block in `batocera/gamelist-entry.xml` into `ports/gamelist.xml` (back it up first; edit with EmulationStation closed)
 
-For online play also copy `web/dist/index.html`, `index.js`, `index.wasm`, `icon.png` to `ports/beltcommand/web/`, and Cloudflare's `cloudflared-linux-amd64` to `ports/beltcommand/cloudflared` (internet play only).
+For online play also copy `web/dist/index.html`, `index.js`, `index.wasm`, `icon.png`, `peerjs.min.js` to `ports/beltcommand/web/`, and Cloudflare's `cloudflared-linux-amd64` to `ports/beltcommand/cloudflared` (internet play only).
 
 `dist-beta/beltcommand_beta.x86_64` is the latest test build, committed so it can be copied to the box without building. Install it next to the main binary (or in place of it) only once it has been tried.
 
@@ -102,11 +104,25 @@ The launcher logs to `/userdata/system/logs/beltcommand.log`. Settings are saved
 
 Lobby: A joins each controller, left/right picks the mode, X/Y add or remove CPU players, Start begins. Buttons are positional, so Switch Pro-style pads work the same way and show Nintendo letters on screen.
 
-Keyboard + mouse: the mouse points (no edge scrolling), WASD or arrows scroll the map, Space or left-click to build, click a build icon to choose it, Q/E or 1-9, 0 to choose, U upgrade, hold R recycle, Backspace or right-click ping, wheel or -/= zoom, Tab map, Esc pause.
+Keyboard + mouse: the mouse points (no edge scrolling), WASD or arrows scroll the map, Space or left-click to build, click a build icon to choose it, Q/E or 1-9, 0 to choose, U upgrade, hold R recycle, Backspace or right-click ping, wheel or -/= zoom, Tab map, Esc or P pause (or the PAUSE button). In full screen the browser keeps Esc for itself, so leaving full screen (or switching tabs) pauses the game.
+
+Touch (phones, tablets):
+
+| Touch | Action |
+|---|---|
+| Drag | Move the map |
+| Pinch | Zoom |
+| Tap a build icon | Choose a structure |
+| Tap the map | Place a ghost there; tap it again (or BUILD) to build, CANCEL to drop it |
+| Tap a structure | UPGRADE / RECYCLE buttons (ATTACK on a rival structure in raid), CLOSE |
+| Tap the minimap | Look there |
+| MAP / PAUSE buttons | Full map, pause |
+
+Menus work by tapping. The lobby has + CPU / - CPU buttons.
 
 ## Online play
 
-The Batocera box hosts; anyone can join from a browser (the Vercel site or the page the box serves itself) or from another box running Belt Command. Couch players on the box and online players share the same game, up to 4 seats in total.
+The Batocera box hosts; anyone can join from a browser (the Vercel site or the page the box serves itself) or from another box running Belt Command. A browser (phone, tablet, computer) can host too, with an invite link. Couch players on the host and online players share the same game, up to 4 seats in total.
 
 | On the host (the box) | |
 |---|---|
@@ -114,12 +130,17 @@ The Batocera box hosts; anyone can join from a browser (the Vercel site or the p
 | Internet | Press BACK (Tab) in the lobby. The box starts `cloudflared` (next to the game) and shows a code plus a QR for `https://belt-command.vercel.app/#join=<code>`. Press BACK again to close the link. |
 | Seats | Online players take free seats in the lobby and show as `NAME` / `ONLINE`. Only the host changes the mode, adds CPUs and starts. Guests who arrive mid-game watch until the next round. A guest who drops mid-game is played by a CPU and gets the seat back on reconnecting. |
 
+| On a browser host | |
+|---|---|
+| Invite | PLAY opens the lobby, and the lobby opens a room: it shows a QR code, a link (`belt-command.vercel.app/#room=CODE`) and a 5-letter room code. SHARE INVITE (top right) opens the phone's share sheet or copies the link. Friends open the link, or JOIN GAME > ENTER CODE. The room closes when the host leaves to the title screen. |
+| Keep it open | A phone host has to keep the game on screen: if the browser goes to the background it stops running the game and guests freeze (the game also pauses). |
+
 | On a guest | |
 |---|---|
 | Browser | Open the link (or JOIN GAME on belt-command.vercel.app and type the code). Keyboard + mouse or a gamepad; the guest plays full screen. START opens LEAVE GAME. |
 | Another box | Title > JOIN GAME lists games on the same network, or ENTER CODE OR ADDRESS for an internet code or an IP. |
 
-How it works: the host runs the only real game. Guests send their buttons, cursor and selected structure about 30 times a second; the host sends snapshots (structures that changed, everything that moves, teams, links) and effect events (explosions, beams, sounds) about 15 times a second, about 3-17 KB/s per guest in tests. The box serves the browser build from `ports/beltcommand/web/`. Internet guests connect through a Cloudflare quick tunnel (no account needed); a box joining over the internet uses the system's OpenSSL for the secure link. Port 8095 (TCP) for the game, 8096 (UDP) for the LAN game list. Host and guests must run the same version (`NET_PROTO` in `src/net.inc`).
+How it works: the host runs the only real game. Box hosts use WebSocket; browser hosts use WebRTC data channels through PeerJS (the free PeerJS cloud server introduces the browsers, and PeerJS's STUN/TURN servers help them connect; the game data then goes browser to browser). Room codes only work in the browser version; a box can't join a browser's room. Guests send their buttons, cursor and selected structure about 30 times a second; the host sends snapshots (structures that changed, everything that moves, teams, links) and effect events (explosions, beams, sounds) about 15 times a second, about 3-17 KB/s per guest in tests. The box serves the browser build from `ports/beltcommand/web/`. Internet guests connect through a Cloudflare quick tunnel (no account needed); a box joining over the internet uses the system's OpenSSL for the secure link. Port 8095 (TCP) for the game, 8096 (UDP) for the LAN game list. Host and guests must run the same version (`NET_PROTO` in `src/net.inc`).
 
 ## Testing without a screen
 
@@ -146,6 +167,8 @@ Run under `xvfb-run` with these environment variables:
 Example: `BC_MUTE=1 SDL_AUDIODRIVER=dummy BC_WINDOW=1920x1080 BC_STATE=game BC_MODE=endless BC_BOTS=1 BC_PLAYERS=4 BC_ADVANCE=300 BC_SHOT=10 BC_SHOT_PATH=shot.bmp xvfb-run -a -s "-screen 0 1920x1080x24" build/bc_test`
 
 ## Status
+
+- 1 Nov 2026: phones and tablets. Touch controls (drag, pinch, tap to place then tap again to build, structure buttons, MAP and PAUSE), a bigger HUD on phones, landscape only, full screen on the first tap. Browsers can host with an invite link (`#room=CODE`, WebRTC through PeerJS). On-screen PAUSE button, and the game pauses when the browser leaves full screen (where Esc never reaches the game) or the tab is hidden. Online protocol is now 2: the box and the website must both be updated. Tested in headless Chromium at phone size (844x390, touch): a browser host with a phone guest, and a phone guest on a box host. Not yet tried on real phones, or over mobile data.
 
 - 28 Oct 2026: online multiplayer. The box hosts (LAN link + QR, internet code through a Cloudflare quick tunnel); browsers and other boxes join, with names in the lobby, guest screens that follow the host, drop-and-rejoin, and a JOIN GAME menu with a LAN game list and an on-screen keyboard. Tested in the cloud: box host with native guests (plain and TLS) and browser guests in headless Chromium, a 3-minute 4-player soak, reconnect, and the pad input test (100 of 100). Not yet tried: the Cloudflare tunnel itself (the cloud workspace can't reach it), and real play on the box.
 

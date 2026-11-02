@@ -34,9 +34,9 @@
 #include <emscripten/websocket.h>
 #endif
 
-static const int NET_PROTO = 1, NET_PORT = 8095, NET_DISC_PORT = 8096, REMOTE_DEV = 2000;
+static const int NET_PROTO = 2, NET_PORT = 8095, NET_DISC_PORT = 8096, REMOTE_DEV = 2000;
 static const char* WEB_SITE = "https://belt-command.vercel.app";
-enum { MSG_JOIN = 'J', MSG_INPUT = 'I', MSG_WELCOME = 'W', MSG_SNAP = 'S' };
+enum { MSG_JOIN = 'J', MSG_INPUT = 'I', MSG_WELCOME = 'W', MSG_SNAP = 'S', MSG_KEEP = 'K' };
 
 // from ui.inc
 static Dev* devById(int id); static Dev* kbd(); static int joinedCount(); static void enterLobby(); static bool pr(const Dev& d, int b); static void usePresses();
@@ -129,7 +129,44 @@ static void writeWorldTail(WBuf& w) { // everything that moves: sent whole every
     for (size_t i = 0; i < G.pings.size() && i < 255; i++) { auto& x = G.pings[i]; w.pos(x.p); w.u8((int)clampf(x.t * 50, 0, 255)); w.u8(x.player); }
 }
 
-// ================================================================ host (native only)
+// ================================================================ host: the box (TCP + WebSocket) or a browser (WebRTC through PeerJS)
+// Shared: seats, guest messages, snapshots. Transport: native sockets below, or the page's BCNet bridge (web/shell.html).
+static std::string wsFrame(const std::string& msg, bool masked) {
+    std::string f; f += (char)0x82; size_t n = msg.size(); uint8_t mb = masked ? 0x80 : 0;
+    if (n < 126) f += (char)(mb | n);
+    else if (n < 65536) { f += (char)(mb | 126); f += (char)(n >> 8); f += (char)(n & 0xff); }
+    else { f += (char)(mb | 127); for (int i = 7; i >= 0; i--) f += (char)((uint64_t)n >> (i * 8) & 0xff); }
+    if (!masked) return f + msg;
+    uint8_t key[4]; uint32_t r = (uint32_t)SDL_GetPerformanceCounter() * 2654435761u; memcpy(key, &r, 4);
+    f.append((const char*)key, 4); std::string body = msg; for (size_t i = 0; i < body.size(); i++) body[i] ^= key[i & 3];
+    return f + body;
+}
+// parse one frame from buf; returns 1 = got a message (op/data set), 0 = need more, -1 = bad
+static int wsParse(std::string& buf, int& op, std::string& data, size_t maxLen) {
+    if (buf.size() < 2) return 0;
+    uint8_t b0 = buf[0], b1 = buf[1]; op = b0 & 15; bool masked = b1 & 0x80; uint64_t n = b1 & 0x7f; size_t p = 2;
+    if (n == 126) { if (buf.size() < 4) return 0; n = ((uint8_t)buf[2] << 8) | (uint8_t)buf[3]; p = 4; }
+    else if (n == 127) { if (buf.size() < 10) return 0; n = 0; for (int i = 0; i < 8; i++) n = (n << 8) | (uint8_t)buf[2 + i]; p = 10; }
+    if (n > maxLen) return -1;
+    size_t need = p + (masked ? 4 : 0) + n; if (buf.size() < need) return 0;
+    data = buf.substr(p + (masked ? 4 : 0), n);
+    if (masked) for (size_t i = 0; i < n; i++) data[i] ^= buf[p + (i & 3)];
+    buf.erase(0, need);
+    return 1;
+}
+
+
+struct Conn { int fd = -1, rtc = -1; std::string in, out; std::vector<std::string> msgs; bool ws = false, closeAfter = false, dead = false, joined = false, needFull = true; int slot = -1; std::string name, token; float idle = 0; };
+static struct {
+    int lfd = -1, udp = -1, port = NET_PORT; std::vector<Conn> conns; float snapT = 0, beaconT = 0; std::string lanIp, hostName = "BELT COMMAND";
+    double sentBytes = 0; float statT = 30;
+    // Cloudflare quick tunnel (box)
+    int tpid = -1, terr = -1; std::string tbuf, turl, tcode; int tstate = 0; std::string tmsg; // tstate 0 off, 1 starting, 2 ready, 3 failed
+    // browser hosting (WebRTC): 0 off, 1 connecting to the invite server, 2 ready, 3 failed
+    int rstate = 0; std::string rcode, rerr, rurl, rshown;
+} NH;
+static bool GUEST_ON(); // guest mode stops this game from hosting
+
 #ifndef __EMSCRIPTEN__
 static std::string sha1(const std::string& s) {
     uint32_t h[5] = { 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0 };
@@ -158,38 +195,6 @@ static std::string b64(const std::string& s) {
     if (bits > -6) o += T[((val << 8) >> (bits + 8)) & 0x3F];
     while (o.size() % 4) o += '='; return o;
 }
-static std::string wsFrame(const std::string& msg, bool masked) {
-    std::string f; f += (char)0x82; size_t n = msg.size(); uint8_t mb = masked ? 0x80 : 0;
-    if (n < 126) f += (char)(mb | n);
-    else if (n < 65536) { f += (char)(mb | 126); f += (char)(n >> 8); f += (char)(n & 0xff); }
-    else { f += (char)(mb | 127); for (int i = 7; i >= 0; i--) f += (char)((uint64_t)n >> (i * 8) & 0xff); }
-    if (!masked) return f + msg;
-    uint8_t key[4]; uint32_t r = (uint32_t)SDL_GetPerformanceCounter() * 2654435761u; memcpy(key, &r, 4);
-    f.append((const char*)key, 4); std::string body = msg; for (size_t i = 0; i < body.size(); i++) body[i] ^= key[i & 3];
-    return f + body;
-}
-// parse one frame from buf; returns 1 = got a message (op/data set), 0 = need more, -1 = bad
-static int wsParse(std::string& buf, int& op, std::string& data, size_t maxLen) {
-    if (buf.size() < 2) return 0;
-    uint8_t b0 = buf[0], b1 = buf[1]; op = b0 & 15; bool masked = b1 & 0x80; uint64_t n = b1 & 0x7f; size_t p = 2;
-    if (n == 126) { if (buf.size() < 4) return 0; n = ((uint8_t)buf[2] << 8) | (uint8_t)buf[3]; p = 4; }
-    else if (n == 127) { if (buf.size() < 10) return 0; n = 0; for (int i = 0; i < 8; i++) n = (n << 8) | (uint8_t)buf[2 + i]; p = 10; }
-    if (n > maxLen) return -1;
-    size_t need = p + (masked ? 4 : 0) + n; if (buf.size() < need) return 0;
-    data = buf.substr(p + (masked ? 4 : 0), n);
-    if (masked) for (size_t i = 0; i < n; i++) data[i] ^= buf[p + (i & 3)];
-    buf.erase(0, need);
-    return 1;
-}
-
-struct Conn { int fd = -1; std::string in, out; bool ws = false, closeAfter = false, dead = false, joined = false, needFull = true; int slot = -1; std::string name, token; float idle = 0; };
-static struct {
-    int lfd = -1, udp = -1, port = NET_PORT; std::vector<Conn> conns; float snapT = 0, beaconT = 0; std::string lanIp, hostName;
-    // Cloudflare quick tunnel
-    double sentBytes = 0; float statT = 30;
-    pid_t tpid = -1; int terr = -1; std::string tbuf, turl, tcode; int tstate = 0; std::string tmsg; // tstate 0 off, 1 starting, 2 ready, 3 failed
-} NH;
-
 static std::string lanIp() {
     std::string ip; ifaddrs* ifs = nullptr;
     if (getifaddrs(&ifs) == 0) {
@@ -206,6 +211,8 @@ static std::string lanIp() {
 }
 static std::string lanJoinUrl() { return "http://" + NH.lanIp + ":" + std::to_string(NH.port) + "/#join"; }
 static bool netHosting() { return NH.lfd >= 0; }
+static void rtcPoll() {}
+static bool rtcSend(int, const std::string&) { return false; }
 
 static void tunnelStart();
 static void netStart() {
@@ -276,6 +283,69 @@ static void tunnelPoll() {
     }
 }
 
+static void handleHttp(Conn& c) {
+    size_t e = c.in.find("\r\n\r\n"); if (e == std::string::npos) { if (c.in.size() > 16384) c.dead = true; return; }
+    std::string head = c.in.substr(0, e); c.in.erase(0, e + 4);
+    std::istringstream is(head); std::string method, path; is >> method >> path;
+    std::string low = head; std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+    size_t k = low.find("sec-websocket-key:");
+    if (k != std::string::npos && low.find("websocket") != std::string::npos) {
+        size_t a = k + 18, b = head.find("\r\n", a); std::string key = head.substr(a, b == std::string::npos ? std::string::npos : b - a);
+        key.erase(0, key.find_first_not_of(" \t")); key.erase(key.find_last_not_of(" \t") + 1);
+        c.out += "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + b64(sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")) + "\r\n\r\n";
+        c.ws = true; return;
+    }
+    size_t q = path.find('?'); if (q != std::string::npos) path = path.substr(0, q);
+    if (path == "/") path = "/index.html";
+    std::string body, type = "text/plain", code = "200 OK", cache = "no-cache";
+    static const char* OK[] = { "/index.html", "/index.js", "/index.wasm", "/icon.png", "/peerjs.min.js" };
+    bool allowed = false; for (auto o : OK) if (path == o) allowed = true;
+    if (allowed) {
+        std::ifstream f(GAMEDIR + "/web" + path, std::ios::binary); std::stringstream ss; ss << f.rdbuf(); body = ss.str();
+        std::string ext = path.substr(path.find_last_of('.') + 1);
+        type = ext == "html" ? "text/html; charset=utf-8" : ext == "js" ? "text/javascript" : ext == "wasm" ? "application/wasm" : "image/png";
+        if (body.empty()) { code = "404 Not Found"; type = "text/html; charset=utf-8"; body = "<h1>Belt Command</h1><p>The browser version is not installed on this box (the web folder next to the game is missing).</p>"; }
+    } else if (path == "/favicon.ico") code = "204 No Content";
+    else { code = "404 Not Found"; body = "not found"; }
+    c.out += "HTTP/1.1 " + code + "\r\nContent-Type: " + type + "\r\nCache-Control: " + cache + "\r\nContent-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+    c.closeAfter = true;
+}
+#else
+// ---- browser: the page's BCNet bridge (PeerJS) carries guests' messages; see web/shell.html ----
+static bool netHosting() { return NH.rstate == 2; }
+static void netStart() {}
+static void tunnelStart() {}
+static void tunnelStop() {}
+static void tunnelPoll() {}
+static bool rtcSend(int id, const std::string& m) { return EM_ASM_INT({ return BCNet.send($0, HEAPU8.slice($1, $1 + $2)) ? 1 : 0; }, id, m.data(), (int)m.size()) != 0; }
+static void rtcHostStart() { if (NH.rstate == 0) { NH.rstate = 1; NH.rerr.clear(); EM_ASM({ BCNet.host(); }); printf("net: opening an invite room\n"); } }
+static void rtcHostStop() { if (NH.rstate) { EM_ASM({ BCNet.stopHost(); }); printf("net: invite room closed\n"); } NH.rstate = 0; NH.rcode.clear(); NH.rurl.clear(); NH.rshown.clear(); for (auto& c : NH.conns) c.dead = true; }
+static void rtcPoll() { // the room's state, from the page
+    if (NH.rstate) {
+        char* st = (char*)EM_ASM_INT({ var s = BCNet.status(); var n = lengthBytesUTF8(s) + 1; var p = _malloc(n); stringToUTF8(s, p, n); return p; });
+        std::string v = st; free(st);
+        std::vector<std::string> f; size_t a = 0; for (;;) { size_t b = v.find('|', a); f.push_back(v.substr(a, b == std::string::npos ? std::string::npos : b - a)); if (b == std::string::npos) break; a = b + 1; }
+        while (f.size() < 4) f.push_back("");
+        int k = atoi(f[0].c_str());
+        if (k == 2 && NH.rstate != 2) printf("net: invite room %s ready\n", f[1].c_str());
+        if (k == 3 && NH.rstate != 3) printf("net: invite room failed: %s\n", f[2].c_str());
+        NH.rstate = k; NH.rcode = f[1]; NH.rerr = f[2]; NH.rurl = f[3];
+    }
+    std::string want = NH.rstate == 2 && G.state == ST_LOBBY ? NH.rurl : ""; // the page's SHARE INVITE button, in the lobby only
+    if (want != NH.rshown) { NH.rshown = want; EM_ASM({ BCNet.showInvite(UTF8ToString($0)); }, want.c_str()); }
+}
+// called by the page: a guest's link opened (1) or closed (2), and messages
+extern "C" EMSCRIPTEN_KEEPALIVE void bc_net_event(int id, int ev) {
+    extern void guestLinkEvent(int); if (id < 0) { guestLinkEvent(ev); return; }
+    if (ev == 1) { Conn c; c.rtc = id; c.ws = true; NH.conns.push_back(c); printf("net: guest link %d open\n", id); }
+    else for (auto& c : NH.conns) if (c.rtc == id) c.dead = true;
+}
+extern "C" EMSCRIPTEN_KEEPALIVE void bc_net_msg(int id, const uint8_t* data, int len) {
+    extern void guestLinkMsg(const uint8_t*, int); if (id < 0) { guestLinkMsg(data, len); return; }
+    for (auto& c : NH.conns) if (c.rtc == id && !c.dead) { c.msgs.emplace_back((const char*)data, len); c.idle = 0; return; }
+}
+#endif
+
 // ---- seats for online players ----
 static Dev* remoteDev(int slot, const std::string& name) {
     int id = REMOTE_DEV + slot; Dev* d = devById(id);
@@ -297,7 +367,10 @@ static int seatRemote(Conn& c) {
     }
     return -1;
 }
-static void sendTo(Conn& c, const std::string& msg) { if (c.out.size() > (4u << 20)) { c.dead = true; return; } c.out += wsFrame(msg, false); }
+static void sendTo(Conn& c, const std::string& msg) {
+    if (c.rtc >= 0) { if (!rtcSend(c.rtc, msg)) c.needFull = true; return; } // a full send buffer drops it: the next snapshot is a full one
+    if (c.out.size() > (4u << 20)) { c.dead = true; return; } c.out += wsFrame(msg, false);
+}
 static void sendWelcome(Conn& c, const std::string& note) { WBuf w; w.u8(MSG_WELCOME); w.u8(NET_PROTO); w.u8((uint8_t)(int8_t)c.slot); w.str(note); w.str(NH.hostName); sendTo(c, w.s); }
 
 static void handleGuestMsg(Conn& c, const std::string& m) {
@@ -321,57 +394,39 @@ static void handleGuestMsg(Conn& c, const std::string& m) {
         d->rmv = V2(mx, my); d->rtl = tl; d->rtr = tr; d->rcur = cur; d->rsel = sel;
     }
 }
-static void handleHttp(Conn& c) {
-    size_t e = c.in.find("\r\n\r\n"); if (e == std::string::npos) { if (c.in.size() > 16384) c.dead = true; return; }
-    std::string head = c.in.substr(0, e); c.in.erase(0, e + 4);
-    std::istringstream is(head); std::string method, path; is >> method >> path;
-    std::string low = head; std::transform(low.begin(), low.end(), low.begin(), ::tolower);
-    size_t k = low.find("sec-websocket-key:");
-    if (k != std::string::npos && low.find("websocket") != std::string::npos) {
-        size_t a = k + 18, b = head.find("\r\n", a); std::string key = head.substr(a, b == std::string::npos ? std::string::npos : b - a);
-        key.erase(0, key.find_first_not_of(" \t")); key.erase(key.find_last_not_of(" \t") + 1);
-        c.out += "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + b64(sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")) + "\r\n\r\n";
-        c.ws = true; return;
-    }
-    size_t q = path.find('?'); if (q != std::string::npos) path = path.substr(0, q);
-    if (path == "/") path = "/index.html";
-    std::string body, type = "text/plain", code = "200 OK", cache = "no-cache";
-    static const char* OK[] = { "/index.html", "/index.js", "/index.wasm", "/icon.png" };
-    bool allowed = false; for (auto o : OK) if (path == o) allowed = true;
-    if (allowed) {
-        std::ifstream f(GAMEDIR + "/web" + path, std::ios::binary); std::stringstream ss; ss << f.rdbuf(); body = ss.str();
-        std::string ext = path.substr(path.find_last_of('.') + 1);
-        type = ext == "html" ? "text/html; charset=utf-8" : ext == "js" ? "text/javascript" : ext == "wasm" ? "application/wasm" : "image/png";
-        if (body.empty()) { code = "404 Not Found"; type = "text/html; charset=utf-8"; body = "<h1>Belt Command</h1><p>The browser version is not installed on this box (the web folder next to the game is missing).</p>"; }
-    } else if (path == "/favicon.ico") code = "204 No Content";
-    else { code = "404 Not Found"; body = "not found"; }
-    c.out += "HTTP/1.1 " + code + "\r\nContent-Type: " + type + "\r\nCache-Control: " + cache + "\r\nContent-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
-    c.closeAfter = true;
-}
-static bool GUEST_ON(); // guest mode stops this box from hosting
 // before the game step: new connections, guest input
 static void netHostRecv(float dt) {
-    if (!netHosting()) return;
+    rtcPoll();
+    if (!netHosting() && NH.conns.empty()) return;
     tunnelPoll();
-    for (;;) {
+#ifndef __EMSCRIPTEN__
+    if (NH.lfd >= 0) for (;;) {
         int fd = accept(NH.lfd, nullptr, nullptr); if (fd < 0) break;
         fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         if (NH.conns.size() >= 32) { close(fd); continue; }
         Conn c; c.fd = fd; NH.conns.push_back(c);
     }
     char buf[16384];
+#endif
     for (auto& c : NH.conns) {
         c.idle += dt;
-        for (;;) { ssize_t n = recv(c.fd, buf, sizeof buf, 0); if (n > 0) { c.in.append(buf, n); c.idle = 0; } else { if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) c.dead = true; break; } }
         if (c.dead) continue;
-        if (!c.ws) handleHttp(c);
-        if (c.ws) for (;;) {
-            int op; std::string data; int r = wsParse(c.in, op, data, 1 << 16);
-            if (r < 0) { c.dead = true; break; } if (r == 0) break;
-            if (op == 2 || op == 1) { if (GUEST_ON()) { c.closeAfter = true; break; } handleGuestMsg(c, data); }
-            else if (op == 8) { c.out += std::string("\x88\x00", 2); c.closeAfter = true; break; }
-            else if (op == 9) { std::string f; f += (char)0x8A; f += (char)data.size(); c.out += f + data; }
+#ifndef __EMSCRIPTEN__
+        if (c.fd >= 0) {
+            for (;;) { ssize_t n = recv(c.fd, buf, sizeof buf, 0); if (n > 0) { c.in.append(buf, n); c.idle = 0; } else { if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) c.dead = true; break; } }
+            if (c.dead) continue;
+            if (!c.ws) handleHttp(c);
+            if (c.ws) for (;;) {
+                int op; std::string data; int r = wsParse(c.in, op, data, 1 << 16);
+                if (r < 0) { c.dead = true; break; } if (r == 0) break;
+                if (op == 2 || op == 1) c.msgs.push_back(std::move(data));
+                else if (op == 8) { c.out += std::string("\x88\x00", 2); c.closeAfter = true; break; }
+                else if (op == 9) { std::string f; f += (char)0x8A; f += (char)data.size(); c.out += f + data; }
+            }
         }
+#endif
+        for (auto& m : c.msgs) { if (GUEST_ON()) { c.closeAfter = true; break; } handleGuestMsg(c, m); }
+        c.msgs.clear();
         if (c.ws && c.joined && c.idle > 10) c.dead = true; // guests send input many times a second; 10 s of silence is a lost link
     }
     // waiting guests take free seats when the host is in the lobby; dropped online players leave the lobby
@@ -382,7 +437,6 @@ static void netHostRecv(float dt) {
 }
 // after the game step: snapshots and effect events to every guest, LAN beacon, flush
 static void netHostSend(float dt) {
-    if (!netHosting()) return;
     // a guest that dropped mid-game: a CPU keeps their seat warm until they come back
     for (auto& c : NH.conns) if (c.dead && c.slot >= 0 && c.slot < 4) {
         Player& p = G.pl[c.slot];
@@ -430,12 +484,13 @@ static void netHostSend(float dt) {
         }
         for (auto& c : NH.conns) if (c.joined && !c.dead) {
             if (c.out.size() > (512u << 10)) { c.needFull = true; continue; } // slow link: skip this one, start fresh with a full snapshot
-            sendTo(c, c.needFull ? full : delta); c.needFull = false;
-            NH.sentBytes += (c.needFull ? full : delta).size();
+            const std::string& m = c.needFull ? full : delta; c.needFull = false;
+            NH.sentBytes += m.size(); sendTo(c, m);
         }
     }
     if (!NETREC) NETEV.s.clear();
     if ((NH.statT -= dt) <= 0) { NH.statT = 30; if (guests) printf("net: %d guest%s, %.1f KB/s sent\n", guests, guests == 1 ? "" : "s", NH.sentBytes / 30 / 1024); NH.sentBytes = 0; }
+#ifndef __EMSCRIPTEN__
     // LAN beacon so other boxes can list this game
     NH.beaconT -= dt;
     if (NH.udp >= 0 && NH.beaconT <= 0 && !GUEST_ON()) {
@@ -445,23 +500,22 @@ static void netHostSend(float dt) {
         sendto(NH.udp, msg, strlen(msg), 0, (sockaddr*)&a, sizeof a);
     }
     for (auto& c : NH.conns) {
+        if (c.fd < 0) continue;
         while (!c.out.empty() && !c.dead) { ssize_t n = send(c.fd, c.out.data(), c.out.size(), MSG_NOSIGNAL); if (n > 0) c.out.erase(0, n); else { if (errno != EAGAIN && errno != EWOULDBLOCK) c.dead = true; break; } }
         if (c.closeAfter && c.out.empty()) c.dead = true;
     }
-    for (auto& c : NH.conns) if (c.dead) { close(c.fd); if (c.joined) printf("net: guest \"%s\" disconnected\n", c.name.c_str()); }
+    for (auto& c : NH.conns) if (c.dead && c.fd >= 0) close(c.fd);
+#else
+    for (auto& c : NH.conns) if (c.closeAfter && !c.dead) { c.dead = true; EM_ASM({ BCNet.drop($0); }, c.rtc); }
+#endif
+    for (auto& c : NH.conns) if (c.dead && c.joined) printf("net: guest \"%s\" disconnected\n", c.name.c_str());
     NH.conns.erase(std::remove_if(NH.conns.begin(), NH.conns.end(), [](const Conn& c) { return c.dead; }), NH.conns.end());
 }
 static int onlineGuests() { int n = 0; for (auto& c : NH.conns) if (c.joined && !c.dead) n++; return n; }
-static void netShutdown() { tunnelStop(); for (auto& c : NH.conns) close(c.fd); NH.conns.clear(); if (NH.lfd >= 0) close(NH.lfd); NH.lfd = -1; }
+#ifndef __EMSCRIPTEN__
+static void netShutdown() { tunnelStop(); for (auto& c : NH.conns) if (c.fd >= 0) close(c.fd); NH.conns.clear(); if (NH.lfd >= 0) close(NH.lfd); NH.lfd = -1; }
 #else
-static bool netHosting() { return false; }
-static void netStart() {}
-static void netHostRecv(float) {}
-static void netHostSend(float) { NETREC = false; NETEV.s.clear(); }
-static void netShutdown() {}
-static int onlineGuests() { return 0; }
-static void tunnelStart() {}
-static void tunnelStop() {}
+static void netShutdown() { rtcHostStop(); }
 #endif
 
 // ================================================================ guest link (native: thread with plain or TLS socket; web: browser WebSocket)
@@ -571,16 +625,20 @@ static EM_BOOL wsOnOpen(int, const EmscriptenWebSocketOpenEvent*, void*) { GL.st
 static EM_BOOL wsOnMsg(int, const EmscriptenWebSocketMessageEvent* e, void*) { if (!e->isText) GL.inbox.emplace_back((const char*)e->data, e->numBytes); return EM_TRUE; }
 static EM_BOOL wsOnClose(int, const EmscriptenWebSocketCloseEvent*, void*) { if (GL.state != 3) { GL.err = GL.state == 2 ? "THE HOST CLOSED THE GAME" : "NO GAME AT THAT ADDRESS"; GL.state = 3; } return EM_TRUE; }
 static EM_BOOL wsOnErr(int, const EmscriptenWebSocketErrorEvent*, void*) { if (GL.state != 3) { GL.err = GL.state == 2 ? "CONNECTION LOST" : "CAN'T CONNECT"; GL.state = 3; } return EM_TRUE; }
-static void linkClose() { if (GL.ws > 0) { emscripten_websocket_close(GL.ws, 1000, "bye"); emscripten_websocket_delete(GL.ws); } GL.ws = 0; GL.state = 0; GL.inbox.clear(); }
+static bool GL_RTC = false; // the link is a WebRTC data channel to a browser host (room code), not a WebSocket
+void guestLinkEvent(int ev) { if (!GL_RTC) return; if (ev == 1) { GL.state = 2; printf("net: connected to room %s\n", GL.url.c_str() + 4); } else if (GL.state != 3) { GL.err = ev == 4 ? "NO GAME WITH THAT CODE" : GL.state == 2 ? "THE HOST CLOSED THE GAME" : "CAN'T REACH THAT GAME"; GL.state = 3; } }
+void guestLinkMsg(const uint8_t* d, int n) { if (GL_RTC) GL.inbox.emplace_back((const char*)d, n); }
+static void linkClose() { if (GL_RTC) EM_ASM({ BCNet.leave(); }); GL_RTC = false; if (GL.ws > 0) { emscripten_websocket_close(GL.ws, 1000, "bye"); emscripten_websocket_delete(GL.ws); } GL.ws = 0; GL.state = 0; GL.inbox.clear(); }
 static void linkOpen(const std::string& url) {
     linkClose(); GL.url = url; GL.err.clear(); GL.state = 1;
+    if (url.rfind("rtc:", 0) == 0) { GL_RTC = true; EM_ASM({ BCNet.join(UTF8ToString($0)); }, url.c_str() + 4); return; }
     EmscriptenWebSocketCreateAttributes a; emscripten_websocket_init_create_attributes(&a); a.url = GL.url.c_str(); a.protocols = nullptr; a.createOnMainThread = EM_TRUE;
     GL.ws = emscripten_websocket_new(&a);
     if (GL.ws <= 0) { GL.state = 3; GL.err = "CAN'T CONNECT"; return; }
     emscripten_websocket_set_onopen_callback(GL.ws, nullptr, wsOnOpen); emscripten_websocket_set_onmessage_callback(GL.ws, nullptr, wsOnMsg);
     emscripten_websocket_set_onclose_callback(GL.ws, nullptr, wsOnClose); emscripten_websocket_set_onerror_callback(GL.ws, nullptr, wsOnErr);
 }
-static void linkSend(const std::string& m) { if (GL.ws > 0 && GL.state == 2) emscripten_websocket_send_binary(GL.ws, (void*)m.data(), (uint32_t)m.size()); }
+static void linkSend(const std::string& m) { if (GL_RTC) { if (GL.state == 2) EM_ASM({ BCNet.send(-1, HEAPU8.slice($0, $0 + $1)); }, m.data(), (int)m.size()); return; } if (GL.ws > 0 && GL.state == 2) emscripten_websocket_send_binary(GL.ws, (void*)m.data(), (uint32_t)m.size()); }
 static void linkPoll(std::vector<std::string>& msgs) { msgs.swap(GL.inbox); }
 #endif
 
@@ -598,6 +656,17 @@ static std::string joinUrl(std::string t, std::string& err) {
     for (auto& ch : t) ch = (char)tolower((unsigned char)ch);
     while (!t.empty() && t.back() == '/') t.pop_back();
     size_t j = t.find("#join="); if (j != std::string::npos) t = t.substr(j + 6);
+    size_t rm = t.find("#room="); if (rm != std::string::npos) t = t.substr(rm + 6);
+    { // a room code from a browser host: 4-6 letters, no dots or dashes
+        bool code = t.size() >= 4 && t.size() <= 6; for (char c : t) if (!isalpha((unsigned char)c)) code = false;
+        if (code) {
+#ifdef __EMSCRIPTEN__
+            for (auto& ch : t) ch = (char)toupper((unsigned char)ch); return "rtc:" + t;
+#else
+            err = "ROOM CODES ARE FOR THE BROWSER VERSION - OPEN BELT-COMMAND.VERCEL.APP"; return "";
+#endif
+        }
+    }
     size_t s = t.find("://"); bool secure = false;
     if (s != std::string::npos) { secure = t.compare(0, s, "https") == 0 || t.compare(0, s, "wss") == 0; t = t.substr(s + 3); }
     size_t sl = t.find('/'); if (sl != std::string::npos) t = t.substr(0, sl);
@@ -751,9 +820,11 @@ static void guestControl(float dt) {
     if (padDev >= 0) { GS.mouseMode = false; GS.localDev = padDev; }
     if (GS.mouseMode) GS.localDev = -1;
     p.dev = GS.localDev;
-    float z = (tr - tl) * dt * 1.3f - wheel * 0.1f; p.zoom = clampf(p.zoom * (1 - z), 0.4f, 1.7f);
+    float z = (tr - tl) * dt * 1.3f - wheel * 0.1f; p.zoom = clampf(p.zoom * (1 - z), 0.4f, zoomMax());
     float vs = viewScale(p); int barSlot = -1;
-    if (GS.mouseMode && k) {
+    if (k && k->clickPend) { int ta = touchButtonAt(k->mouse); if (ta) { touchAction(p, ta); k->clickPend = false; edge[B_A] = false; } }
+    if (TC.on && GS.mouseMode) { touchCursor(p); p.dev = -1; }
+    else if (GS.mouseMode && k) {
         V2 off = p.cur - p.cam;
         p.cam += k->mv * (900 / p.zoom * dt); p.cam.x = clampf(p.cam.x, -150, G.WW + 150); p.cam.y = clampf(p.cam.y, -150, G.WH + 150);
         V2 ms = k->mouse;
@@ -767,6 +838,7 @@ static void guestControl(float dt) {
         if (p.cur.y > p.cam.y + by) p.cam.y = p.cur.y - by; if (p.cur.y < p.cam.y - by) p.cam.y = p.cur.y + by;
     }
     p.hover = hoverAt(p.team, p.cur, rivals()); if (p.hover >= 0 && !seen(p.team, G.st[p.hover].team)) p.hover = -1;
+    if (TC.on && GS.mouseMode) touchHover(p);
     p.bigMap = held[B_BACK];
     if (edge[B_LB]) { p.sel = (p.sel + NBUILD - 1) % NBUILD; AU.play(SND_UI, 0.5f); }
     if (edge[B_RB]) { p.sel = (p.sel + 1) % NBUILD; AU.play(SND_UI, 0.5f); }
@@ -774,7 +846,7 @@ static void guestControl(float dt) {
     if (barSlot >= 0 && k && k->clickPend) { if (p.sel != barSlot) { p.sel = barSlot; AU.play(SND_UI, 0.5f); } edge[B_A] = false; } // clicking the build bar picks, never builds
     bool own = p.hover >= 0 && G.st[p.hover].team == p.team;
     if (held[B_Y] && own && G.st[p.hover].t != S_HQ) p.yHold += dt; else p.yHold = 0; // the host does the real recycle after the same hold
-    for (int b : { B_A, B_B, B_X }) if (edge[b]) GS.edges |= 1u << b;
+    for (int b : { B_A, B_B, B_X, B_RECYCLE }) if (edge[b]) GS.edges |= 1u << b;
     // BC_GUESTBOT=1 (test): build something near my command every second (solar, miner, laser in turn)
     static float botT = 1; if (getenv("BC_GUESTBOT") && (botT -= dt) <= 0) {
         botT = 1; static int k = 0; const int picks[3] = { 1, 3, 4 }; p.sel = picks[k++ % 3];
@@ -787,6 +859,7 @@ static void guestControl(float dt) {
         uint32_t h = 0; for (int b = 0; b < NB; b++) if (held[b] && (b == B_Y || b == B_BACK)) h |= 1u << b;
         WBuf w; w.u8(MSG_INPUT); w.u32(GS.edges); w.u32(h); w.u8((int)(clampf(mv.x, -1, 1) * 127) & 255); w.u8((int)(clampf(mv.y, -1, 1) * 127) & 255);
         w.frac(tl); w.frac(tr); w.v2(p.cur); w.u8(p.sel); linkSend(w.s); GS.edges = 0;
+        if (TC.mode == 3) TC.mode = 0; // the touch action went out with its cursor
     }
 }
 // local effects between snapshots: things keep moving, particles and beams fade, engines leave trails
@@ -817,6 +890,7 @@ static void guestUpdate(float dt) {
     if (GS.welcomed && GS.quietT > 12) { guestLeave("THE HOST STOPPED ANSWERING"); usePresses(); return; }
     bool anyB = false, anyA = false, anyStart = false; for (auto& d : G.devs) if (!d.remote) { anyB |= pr(d, B_B); anyA |= pr(d, B_A); anyStart |= pr(d, B_START); }
     if (!GS.welcomed) { G.state = ST_NET; if (anyB) guestLeave(); usePresses(); return; }
+    { static float kaT = 0; if ((kaT -= dt) <= 0) { kaT = 1; linkSend(std::string(1, MSG_KEEP)); } } // still here (the host drops links that go quiet for 10 s)
     int hs = GS.hostState;
     if (hs == ST_GAME && GS.haveWorld) {
         G.state = ST_GAME;
@@ -883,7 +957,22 @@ static void drawHostPanel(Canvas& cv, float u) {
         if (NH.tstate != 1) FONT.draw(cv, "PRESS BACK / TAB TO OPEN A LINK", V2(rx + qs, y + 80 * u), 17 * u, PCOL[0], 2);
     }
 #else
-    (void)cv; (void)u;
+    if (!NH.rstate) return;
+    float y = 800 * u, qs = 170 * u, x = G.W * 0.5f - 814 * u;
+    if (NH.rstate == 2) {
+        drawQR(cv, NH.rurl, x, y, qs);
+        float tx = x + qs + 24 * u;
+        FONT.draw(cv, "INVITE FRIENDS: SCAN, OR TAP SHARE INVITE", V2(tx, y + 14 * u), 16 * u, withA(C_WHITE, 0.85f));
+        std::string shown = NH.rurl; size_t pp = shown.find("://"); if (pp != std::string::npos) shown = shown.substr(pp + 3);
+        size_t qq = shown.find('?'), hh = shown.find('#'); if (qq != std::string::npos && hh != std::string::npos && qq < hh) shown.erase(qq, hh - qq);
+        for (auto& ch : shown) ch = (char)toupper((unsigned char)ch);
+        FONT.draw(cv, shown.c_str(), V2(tx, y + 50 * u), std::min(22 * u, 900 * u / std::max(1.f, (float)shown.size()) * 1.6f), PCOL[0]);
+        FONT.draw(cv, ("ROOM CODE  " + NH.rcode).c_str(), V2(tx, y + 92 * u), 26 * u, C_MIN, 0, 0, 0.6f);
+        char g[64]; snprintf(g, sizeof g, "ONLINE PLAYERS: %d   (JOIN GAME > ENTER CODE ON ANOTHER DEVICE)", onlineGuests()); FONT.draw(cv, g, V2(tx, y + 136 * u), 14 * u, withA(C_DIM, 0.95f));
+    } else {
+        FONT.draw(cv, NH.rstate == 1 ? "OPENING AN INVITE ROOM..." : ("NO INVITE ROOM: " + NH.rerr).c_str(), V2(x, y + 40 * u), 18 * u, NH.rstate == 3 ? C_BAD : withA(C_WHITE, 0.85f));
+        if (NH.rstate == 3) FONT.draw(cv, "LEAVE AND REOPEN THE LOBBY TO TRY AGAIN", V2(x, y + 76 * u), 15 * u, withA(C_DIM, 0.95f));
+    }
 #endif
 }
 // guest screens: connecting, waiting, errors

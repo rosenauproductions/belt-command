@@ -35,4 +35,10 @@ Built 28 Oct 2026 in `src/net.inc` (host server, snapshots, guest client, LAN li
 README "Online play" has how to use it; `docs/ONLINE_MULTIPLAYER_HANDOVER.md` the design. Bump `NET_PROTO` whenever the
 snapshot or input format changes, and ship the box build and the Vercel build together (they must match).
 Test: native host + `BC_JOIN` guest, or Playwright on `http://127.0.0.1:8095/#join` with the web files in `$BC_HOME/web`.
+Browser hosting (1 Nov 2026): the same host code runs in the browser; guests reach it over WebRTC via the `BCNet` bridge in
+`web/shell.html` (PeerJS, ids `beltcmd-<code>`, `bc_net_msg` / `bc_net_event` exports, messages over 16 KB cut into parts).
+Test it with a local PeerServer (`npm i peer@1.0.2`, `PeerServer({port:9000, host:'127.0.0.1', path:'/'})`) and `?peer=127.0.0.1:9000`
+in the page URL; Chromium needs `--disable-features=WebRtcHideLocalIpsWithMdns`. `?debug` logs taps.
+Touch: `src/touch.h` (state) + `src/touch.inc` (events, taps, buttons). Test with Playwright `isMobile`/`hasTouch` at 844x390 and CDP
+`Input.dispatchTouchEvent` for drags and pinches.
 Wii U port: on hold, `docs/WIIU_PLAN.md`.

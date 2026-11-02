@@ -14,7 +14,7 @@ static bool pr(const Dev& d, int b) { return d.pend[b]; }
 static void usePresses() { for (auto& d : G.devs) { memset(d.pend, 0, sizeof d.pend); d.clickPend = false; d.digit = -1; } }
 // mouse on menus: menuList() records where it drew its items, so hovering selects and clicking activates
 static struct { int n = 0, frame = -9; float cx = 0, y = 0, size = 0, gap = 0, w[12] = {}; } MH;
-static struct { float mx = 0, my = 0, mw = 0, mh = 0, sx = 0, sy = 0, sw = 0, sh = 0; int frame = -9; } LB; // lobby: mode label, start button
+static struct { float mx = 0, my = 0, mw = 0, mh = 0, sx = 0, sy = 0, sw = 0, sh = 0, ax = -1e9f, rx = -1e9f, cw = 0; int frame = -9; } LB; // lobby: mode label, start button
 static Dev* kbd();
 static bool mouseIn(float x, float y, float w, float h) { Dev* k = kbd(); return k && k->mouse.x >= x && k->mouse.x <= x + w && k->mouse.y >= y && k->mouse.y <= y + h; }
 static int menuMouse(int& sel, bool& click) { // hover selects; returns the item clicked, or -1
@@ -107,7 +107,7 @@ static void readDevs(float dt, bool inGame) {
             d.b[B_LB] = k[SDL_SCANCODE_Q] || k[SDL_SCANCODE_PAGEUP];
             d.b[B_RB] = k[SDL_SCANCODE_E] || k[SDL_SCANCODE_PAGEDOWN];
             d.b[B_START] = (inGame && k[SDL_SCANCODE_ESCAPE]) || k[SDL_SCANCODE_P] || (!inGame && (k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_KP_ENTER]));
-            d.b[B_BACK] = k[SDL_SCANCODE_TAB];
+            d.b[B_BACK] = k[SDL_SCANCODE_TAB] || TC.mapOn;
             if (k[SDL_SCANCODE_MINUS] || k[SDL_SCANCODE_KP_MINUS]) d.tr = 1;
             if (k[SDL_SCANCODE_EQUALS] || k[SDL_SCANCODE_KP_PLUS]) d.tl = 1;
             float sx = (float)G.W / G.outW, sy = (float)G.H / G.outH; int ww, wh; SDL_GetWindowSize(G.win, &ww, &wh);
@@ -168,13 +168,15 @@ static void updatePlayer(Player& p, float dt) {
     if (!T.alive && G.mode == MODE_VERSUS) { /* spectate: still allow moving */ }
     // zoom
     float z = (d->tr - d->tl) * dt * 1.3f; if (d->wheel != 0) { z -= d->wheel * 0.1f; }
-    p.zoom = clampf(p.zoom * (1 - z), 0.4f, 1.7f);
+    p.zoom = clampf(p.zoom * (1 - z), 0.4f, zoomMax());
     float vs = viewScale(p);
     int barSlot = -1;
+    if (d->id == -1 && d->clickPend && G.state == ST_GAME) { int ta = touchButtonAt(d->mouse); if (ta) { touchAction(p, ta); d->clickPend = false; d->pend[B_A] = false; } } // on-screen buttons work with the mouse too
     if (d->remote) { // online player: the cursor and selection come from their own device
         p.cur = V2(clampf(d->rcur.x, -100, G.WW + 100), clampf(d->rcur.y, -100, G.WH + 100)); p.cam = p.cur;
         if (d->rsel >= 0 && d->rsel < NBUILD) p.sel = d->rsel;
-    } else if (d->id == -1) {
+    } else if (d->id == -1 && TC.on) touchCursor(p);
+    else if (d->id == -1) {
         // keyboard + mouse: WASD / arrows scroll the map, the mouse only points (no edge scrolling)
         V2 off = p.cur - p.cam;
         p.cam += d->mv * (900 / p.zoom * dt);
@@ -194,6 +196,7 @@ static void updatePlayer(Player& p, float dt) {
     }
     p.hover = hoverAt(p.team, p.cur, rivals());
     if (p.hover >= 0 && !seen(p.team, G.st[p.hover].team)) p.hover = -1;
+    if (d->id == -1 && TC.on) touchHover(p);
     p.bigMap = d->b[B_BACK];
     if (!T.alive) return;
     if (pr(*d, B_LB)) { p.sel = (p.sel + NBUILD - 1) % NBUILD; AU.play(SND_UI, 0.5f); }
@@ -203,6 +206,7 @@ static void updatePlayer(Player& p, float dt) {
     bool own = p.hover >= 0 && G.st[p.hover].team == p.team;
     if (pr(*d, B_A)) { if (own) toast(p, "SPACE TAKEN - MOVE OFF THE STRUCTURE"), pSound(p, SND_ERR, 0.4f); else tryBuild(p, BUILDS[p.sel], p.cur, false); }
     if (pr(*d, B_X)) { if (own) tryUpgrade(p, p.hover, false); else { toast(p, "POINT AT A STRUCTURE TO UPGRADE"); pSound(p, SND_ERR, 0.4f); } }
+    if (pr(*d, B_RECYCLE) && own && G.st[p.hover].t != S_HQ) { recycle(p, p.hover); p.yHold = -10; }
     if (d->b[B_Y] && own && G.st[p.hover].t != S_HQ) { p.yHold += dt; if (p.yHold >= 0.6f) { recycle(p, p.hover); p.yHold = -10; } }
     else if (!d->b[B_Y]) p.yHold = 0; else p.yHold = std::min(p.yHold, 0.f);
     if (pr(*d, B_B)) {
@@ -210,6 +214,7 @@ static void updatePlayer(Player& p, float dt) {
         // raid: ping a rival structure to send every fighter at it
         if (raid() && p.hover >= 0 && G.st[p.hover].team != p.team) { T.order = p.hover; T.orderT = 45; for (auto& f : G.fi) if (f.team == p.team) f.retarget = 0; toast(p, "FIGHTERS ATTACKING"); }
     }
+    if (d->id == -1 && TC.mode == 3) TC.mode = 0; // a touch action used the cursor this step
 }
 
 // ---------------------------------------------------------------- menus
@@ -254,8 +259,10 @@ static void joinPlayer(int devId, bool cpu) {
 // ---------------------------------------------------------------- joining an online game: join screen, typing names and codes
 #ifndef __EMSCRIPTEN__
 static bool NETTUN_ON() { return NH.tstate == 1 || NH.tstate == 2; }
+#define BACKHINT "    BACK ONLINE"
 #else
 static bool NETTUN_ON() { return false; }
+#define BACKHINT ""
 #endif
 static struct { int purpose = 0, key = 0, back = ST_JOIN; std::string text, lastCode, after; bool mouseHot = false; } TX; // purpose 0: name, 1: code
 static const char* KEYROWS[4] = { "ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ0123", "456789-.:/" };
@@ -377,6 +384,7 @@ static void autoJoin() {
     std::string hash = emscripten_run_script_string("location.hash"), host = emscripten_run_script_string("location.host"), prot = emscripten_run_script_string("location.protocol"), port = emscripten_run_script_string("location.port");
     std::string target;
     if (hash.rfind("#join=", 0) == 0) target = hash.substr(6);
+    else if (hash.rfind("#room=", 0) == 0) target = hash.substr(6); // a browser host's invite
     else if (hash == "#join" || (prot == "http:" && port == std::to_string(NET_PORT))) target = host;
     if (target.empty()) return;
     printf("net: link asks to join %s\n", target.c_str());
@@ -442,6 +450,8 @@ static void updateMenus(float dt) {
             bool kbJoined = false; for (auto& p : G.pl) if (p.joined && !p.cpu && p.dev == -1) kbJoined = true;
             if (mouseIn(LB.mx, LB.my, LB.mw, LB.mh)) { G.mode = (G.mode + (k->mouse.x < LB.mx + LB.mw / 2 ? MODE_N - 1 : 1)) % MODE_N; AU.play(SND_UI, 0.6f); }
             else if (mouseIn(LB.sx, LB.sy, LB.sw, LB.sh)) { if (!kbJoined && joinedCount() < 4) joinPlayer(-1, false); startNow = true; }
+            else if (mouseIn(LB.ax, LB.sy, LB.cw, LB.sh)) { if (joinedCount() < 4) joinPlayer(-9, true); }
+            else if (mouseIn(LB.rx, LB.sy, LB.cw, LB.sh)) { for (int i = 3; i >= 0; i--) if (G.pl[i].joined && G.pl[i].cpu && !G.pl[i].remote) { G.pl[i].joined = false; AU.play(SND_UI, 0.6f); break; } }
             else if (!kbJoined && joinedCount() < 4) joinPlayer(-1, false);
         }
         bool anyHuman = false; for (auto& p : G.pl) if (p.joined && !p.cpu) anyHuman = true;
@@ -555,12 +565,19 @@ static void renderMenus(Canvas& cv) {
           float bw = 260 * u, bh = 64 * u, bx = cx - bw / 2, by = my + 130 * u; LB.sx = bx; LB.sy = by; LB.sw = bw; LB.sh = bh;
           bool hot = mouseIn(bx, by, bw, bh);
           drawPanel(cv, bx, by, bw, bh, any ? (hot ? C_WHITE : PCOL[0]) : withA(C_DIM, 0.5f), u);
-          FONT.draw(cv, any ? "START" : "CLICK TO JOIN", V2(cx, by + 20 * u), (any ? 26 : 18) * u, any ? (hot ? C_WHITE : PCOL[0]) : withA(C_WHITE, 0.6f), 1, 0, any ? 1.0f : 0.3f); }
+          FONT.draw(cv, any ? "START" : TC.on ? "TAP TO JOIN" : "CLICK TO JOIN", V2(cx, by + 20 * u), (any ? 26 : 18) * u, any ? (hot ? C_WHITE : PCOL[0]) : withA(C_WHITE, 0.6f), 1, 0, any ? 1.0f : 0.3f);
+          // CPU players by mouse or touch (X / Y on a pad)
+          float cw = 150 * u; LB.cw = cw; LB.ax = bx + bw + 24 * u; LB.rx = bx - 24 * u - cw;
+          bool anyCpu = false; for (auto& p : G.pl) if (p.joined && p.cpu && !p.remote) anyCpu = true;
+          drawPanel(cv, LB.ax, by, cw, bh, joinedCount() < 4 ? withA(C_WHITE, 0.6f) : withA(C_DIM, 0.4f), u);
+          FONT.draw(cv, "+ CPU", V2(LB.ax + cw / 2, by + 22 * u), 20 * u, joinedCount() < 4 ? withA(C_WHITE, 0.85f) : C_DIM, 1);
+          drawPanel(cv, LB.rx, by, cw, bh, anyCpu ? withA(C_WHITE, 0.6f) : withA(C_DIM, 0.4f), u);
+          FONT.draw(cv, "- CPU", V2(LB.rx + cw / 2, by + 22 * u), 20 * u, anyCpu ? withA(C_WHITE, 0.85f) : C_DIM, 1); }
         const char* md = G.mode == MODE_COOP ? "SHARE ONE BASE AND ONE STOCKPILE. PLAY THE MISSIONS." : G.mode == MODE_ENDLESS ? "SHARE ONE BASE. THE WAVES NEVER STOP." : G.mode == MODE_VERSUS ? "EVERYONE BUILDS THEIR OWN BASE. TURRETS FIRE ON RIVALS TOO." : "NO ALIENS. YOUR FRIENDS ARE THE RIVALS. FIND THEIR BASES AND SEND CARRIER FIGHTERS.";
         FONT.draw(cv, md, V2(cx, my + 56 * u), 18 * u, withA(C_WHITE, 0.85f), 1);
         if (G.mode == MODE_ENDLESS && G.opt.bestEndless > 0) FONT.draw(cv, ("BEST " + mmss((float)G.opt.bestEndless)).c_str(), V2(cx, my + 92 * u), 16 * u, C_MIN, 1);
         if (GS.on) FONT.draw(cv, "THE HOST PICKS THE MODE AND STARTS   -   B LEAVE THE GAME", V2(cx, G.H - 70 * u), 16 * u, withA(C_DIM, 0.95f), 1);
-        else { drawHostPanel(cv, u); FONT.draw(cv, "A JOIN    B LEAVE    LEFT/RIGHT MODE    X ADD CPU    Y REMOVE CPU    BACK ONLINE    START BEGIN", V2(cx, G.H - 40 * u), 15 * u, withA(C_DIM, 0.95f), 1); }
+        else { drawHostPanel(cv, u); FONT.draw(cv, "A JOIN    B LEAVE    LEFT/RIGHT MODE    X ADD CPU    Y REMOVE CPU" BACKHINT "    START BEGIN", V2(cx, G.H - 40 * u), 15 * u, withA(C_DIM, 0.95f), 1); }
         break;
     }
     case ST_JOIN: renderJoin(cv, u, cx); break;
@@ -742,6 +759,7 @@ static bool frame() {
     { // follow the browser window size
         int cw = EM_ASM_INT({ return window.innerWidth; }), ch = EM_ASM_INT({ return window.innerHeight; }); int ww, wh; SDL_GetWindowSize(G.win, &ww, &wh);
         if (cw > 0 && ch > 0 && (cw != ww || ch != wh)) { SDL_SetWindowSize(G.win, cw, ch); setupTarget(); if (G.state == ST_GAME) layoutViews(); }
+        if (ch > 0) TC.dpr = (float)G.H / ch;
     }
 #endif
     double& acc = LOOP.acc; float& fpsT = LOOP.fpsT; int& fpsN = LOOP.fpsN; Uint64& last = LOOP.last;
@@ -754,8 +772,12 @@ static bool frame() {
             case SDL_CONTROLLERDEVICEADDED: openPad(e.cdevice.which); break;
             case SDL_CONTROLLERDEVICEREMOVED: closePad(e.cdevice.which); break;
             case SDL_CONTROLLERBUTTONDOWN: { Dev* p = devById(e.cbutton.which); int b = padButton(e.cbutton.button); if (p && b >= 0) p->hit[b] = true; break; }
-            case SDL_MOUSEBUTTONDOWN: { Dev* k = devById(-1); if (k) { if (e.button.button == SDL_BUTTON_LEFT) k->click = true; else if (e.button.button == SDL_BUTTON_RIGHT) k->hit[B_B] = true; } break; }
-            case SDL_MOUSEMOTION: { Dev* k = devById(-1); if (k) k->mouseMoved = true; break; }
+            case SDL_FINGERDOWN: case SDL_FINGERMOTION: case SDL_FINGERUP: touchEvent(e); break;
+            case SDL_MOUSEBUTTONDOWN: { if (e.button.which == SDL_TOUCH_MOUSEID && touchInGame()) break; // in the game, touches are handled as touches
+                Dev* k = devById(-1); if (k) { if (e.button.button == SDL_BUTTON_LEFT) k->click = true; else if (e.button.button == SDL_BUTTON_RIGHT) k->hit[B_B] = true; } break; }
+            case SDL_MOUSEMOTION: { if (e.motion.which != SDL_TOUCH_MOUSEID && TC.on && (std::abs(e.motion.xrel) + std::abs(e.motion.yrel) > 2)) { TC.on = false; printf("input: mouse\n"); }
+                if (e.motion.which == SDL_TOUCH_MOUSEID && touchInGame()) break;
+                Dev* k = devById(-1); if (k) k->mouseMoved = true; break; }
             case SDL_KEYDOWN: {
                 if (G.state == ST_TEXT) { textKey(e.key.keysym.scancode); break; } // typing a name or code: keys are letters, not game buttons
                 Dev* k = devById(-1); if (k && !e.key.repeat) keyHit(*k, e.key.keysym.scancode, G.state == ST_GAME && !G.paused && !G.result); break; }
@@ -764,6 +786,10 @@ static bool frame() {
             case SDL_WINDOWEVENT: if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) { setupTarget(); if (G.state == ST_GAME) layoutViews(); } break;
             }
         }
+#ifndef __EMSCRIPTEN__
+        { int ww, wh; SDL_GetWindowSize(G.win, &ww, &wh); if (wh > 0) TC.dpr = (float)G.H / wh; }
+#endif
+        if (G.state != ST_GAME) { TC.mode = 0; TC.mapOn = false; TC.zoomSet = false; TC.f.clear(); }
         Uint64 now = SDL_GetPerformanceCounter(); double dt = (double)(now - last) / SDL_GetPerformanceFrequency(); last = now;
         if (G.shotFrame >= 0) dt = 1 / 60.0;
         // BC_PADTEST=N: plug in a virtual pad, give it to P1 and tap RB N times (down one frame, up the next),
@@ -779,6 +805,12 @@ static bool frame() {
         }
         if (dt > 0.1) dt = 0.1;
         fpsT += (float)dt; fpsN++; if (fpsT > 30) { printf("fps: %.1f (enemies %d, structures %d, particles %d)\n", fpsN / fpsT, (int)G.en.size(), (int)G.st.size(), (int)G.parts.size()); fpsT = 0; fpsN = 0; }
+#ifdef __EMSCRIPTEN__
+        { // a browser hosts an invite room while it is in the lobby or a game (not when it is someone else's guest)
+            bool want = !GS.on && (G.state == ST_LOBBY || G.state == ST_MISSIONS || G.state == ST_GAME);
+            if (want && NH.rstate == 0) rtcHostStart(); else if (!want && NH.rstate) rtcHostStop();
+        }
+#endif
         netHostRecv((float)dt); // online players' input arrives before this frame's game steps
         // BC_HOSTWAIT=n (test): start the game from the lobby once n online players have joined; BC_HOSTCPU=1 lets the CPU play their seats
         if (getenv("BC_HOSTWAIT") && G.state == ST_LOBBY) { int n = 0; for (auto& p : G.pl) if (p.joined && p.remote) n++; if (n >= atoi(getenv("BC_HOSTWAIT"))) { startGame(); if (getenv("BC_HOSTCPU")) for (auto& p : G.pl) if (p.remote) p.cpu = true; } }
@@ -814,6 +846,9 @@ static bool frame() {
 }
 
 static int gameMain() {
+#ifdef __EMSCRIPTEN__
+    TC.log = EM_ASM_INT({ return location.search.indexOf("debug") >= 0 ? 1 : 0; }) != 0;
+#endif
     setvbuf(stdout, nullptr, _IOLBF, 0);
 #ifdef __EMSCRIPTEN__
     SDL_SetMainReady();
@@ -872,6 +907,12 @@ static int gameMain() {
 #ifdef __EMSCRIPTEN__
 // The page starts the game by calling bc_main() once the runtime is ready (web/shell.html). Some Emscripten builds
 // (Ubuntu's 3.1.6 package with clang 15) never export main(), so the game does not rely on it.
+// the page calls this when it leaves fullscreen (the browser keeps ESC for that) or goes to the background
+extern "C" EMSCRIPTEN_KEEPALIVE void bc_pause() {
+    if (G.state != ST_GAME || G.paused || G.result) return;
+    if (GS.on) { if (!GS.leaveAsk) { GS.leaveAsk = true; GS.leaveSel = 1; } return; } // a guest can't pause the host's game: offer LEAVE instead
+    for (auto& p : G.pl) if (p.joined && !p.cpu && !p.remote && p.dev == -1) { G.paused = true; G.pauseSel = 0; G.pauser = p.idx; printf("game: paused by the page\n"); return; }
+}
 extern "C" EMSCRIPTEN_KEEPALIVE int bc_main() { static bool started = false; if (started) return 0; started = true; return gameMain(); }
 int main() { return 0; }
 #else

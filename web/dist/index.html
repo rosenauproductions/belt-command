@@ -2,13 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <title>Belt Command</title>
 <meta name="description" content="Mine asteroids, power your network, hold the belt. Vector mining and defense for 1-4 players, split screen. Keyboard, mouse and gamepads.">
 <meta name="theme-color" content="#02040a">
 <link rel="icon" type="image/png" href="icon.png">
 <style>
-  html, body { margin: 0; height: 100%; background: #02040a; overflow: hidden; }
+  html, body { margin: 0; height: 100%; background: #02040a; overflow: hidden; overscroll-behavior: none; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
   canvas#canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; outline: none; background: #02040a; }
   #cover { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
            background: radial-gradient(ellipse at center, #08142a 0%, #02040a 70%); color: #8fe8ff; font: 600 16px/1.4 ui-monospace, Menlo, Consolas, monospace;
@@ -21,6 +24,14 @@
   #fs { position: fixed; right: 10px; bottom: 10px; z-index: 3; width: 34px; height: 34px; border: 1px solid #3c5070; border-radius: 4px; background: rgba(6,10,18,.7);
         color: #8fe8ff; font-size: 18px; cursor: pointer; opacity: .45; }
   #fs:hover { opacity: 1; }
+  #rotate { position: fixed; inset: 0; z-index: 5; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+            background: #02040a; color: #8fe8ff; font: 600 18px/1.4 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .12em; text-align: center; padding: 24px; }
+  #rotate .ph { width: 60px; height: 100px; border: 3px solid #28dcff; border-radius: 10px; box-shadow: 0 0 16px rgba(40,220,255,.5); animation: turn 2.2s ease-in-out infinite; }
+  @keyframes turn { 0%, 30% { transform: rotate(0deg); } 60%, 100% { transform: rotate(-90deg); } }
+  @media (orientation: portrait) and (pointer: coarse) { #rotate { display: flex; } }
+  #invite { position: fixed; top: 12px; right: 12px; z-index: 3; display: none; padding: 10px 16px; border: 2px solid #28dcff; border-radius: 4px;
+            background: rgba(6,10,18,.85); color: #fff; font: 600 14px ui-monospace, Menlo, Consolas, monospace; letter-spacing: .1em; cursor: pointer;
+            box-shadow: 0 0 14px rgba(40,220,255,.4); }
 </style>
 </head>
 <body>
@@ -30,23 +41,131 @@
   <div class="tag">MINE &nbsp;-&nbsp; POWER &nbsp;-&nbsp; DEFEND</div>
   <div class="go" id="go">LOADING...</div>
   <div class="help">KEYBOARD + MOUSE: the mouse points, WASD or arrows scroll the map, click or SPACE to build, click the icons (or Q/E, 1-0) to choose, U upgrade, hold R recycle, right-click ping, wheel zoom, TAB map, ESC pause. Menus work with the mouse too.<br>
-  GAMEPADS: plug in up to 4 and press A on each to join. Split screen on one display.</div>
+  GAMEPADS: plug in up to 4 and press A on each to join. Split screen on one display.<br>
+  TOUCH: drag to move, pinch to zoom, tap an icon then tap the map to place it, tap again to build. Tap a structure to upgrade or recycle.</div>
 </div>
 <button id="fs" title="Full screen">&#x26F6;</button>
+<button id="invite">SHARE INVITE</button>
+<div id="rotate"><div class="ph"></div><div>TURN YOUR PHONE SIDEWAYS</div><div style="color:#7887a0;font-size:13px">BELT COMMAND PLAYS IN LANDSCAPE</div></div>
+<script src="peerjs.min.js?v=20261101185552"></script>
 <script>
   var cover = document.getElementById('cover'), go = document.getElementById('go'), canvas = document.getElementById('canvas');
   var Module = {
     canvas: canvas,
-    locateFile: function (f) { return f + '?v=20261028175600'; }, // new build = new URL, so a cached old index.wasm is never used
+    locateFile: function (f) { return f + '?v=20261101185552'; }, // new build = new URL, so a cached old index.wasm is never used
     print: function (t) { console.log(t); },
     printErr: function (t) { console.warn(t); },
     onRuntimeInitialized: function () { cover.classList.remove('loading'); go.textContent = 'CLICK TO PLAY'; if (Module._bc_main) Module._bc_main(); }
   };
+
+  // ---- online play between browsers (WebRTC through PeerJS): a browser can host a room and others join by link (#room=CODE).
+  // Messages are the same bytes the box sends over its WebSocket. Big ones are cut into 16 KB parts: first byte 0 whole, 1 part, 2 last part.
+  var BCNet = (function () {
+    var peer = null, state = 0, code = '', err = '', url = '', conns = {}, nextId = 1, gconn = null, gpeer = null, tries = 0, inviteUrl = '';
+    var PART = 16000, parts = {};
+    function opts() {
+      var q = new URLSearchParams(location.search).get('peer'); // ?peer=host:port uses a local PeerJS server (tests)
+      if (q) { var hp = q.split(':'); return { host: hp[0], port: +hp[1] || 9000, path: '/', secure: false, debug: 1 }; }
+      return { debug: 1 };
+    }
+    function call(fn, a, b) { if (Module[fn]) Module[fn](a, b); }
+    function deliver(id, data) {
+      var u8 = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) : data);
+      if (!u8.length) return;
+      var kind = u8[0], body = u8.subarray(1), msg = null;
+      if (kind === 0) msg = body;
+      else {
+        (parts[id] = parts[id] || []).push(body.slice());
+        if (kind !== 2) return;
+        var n = 0; parts[id].forEach(function (p) { n += p.length; });
+        msg = new Uint8Array(n); n = 0; parts[id].forEach(function (p) { msg.set(p, n); n += p.length; }); parts[id] = [];
+      }
+      var ptr = Module._malloc(msg.length || 1); HEAPU8.set(msg, ptr); Module._bc_net_msg(id, ptr, msg.length); Module._free(ptr);
+    }
+    function sendOn(c, u8) {
+      if (!c || !c.open) return false;
+      var dc = c.dataChannel; if (dc && dc.bufferedAmount > 512 * 1024) return false; // slow link: skip, the host sends a full snapshot later
+      for (var o = 0; o < u8.length || o === 0; o += PART) {
+        var end = Math.min(u8.length, o + PART), last = end >= u8.length, f = new Uint8Array(end - o + 1);
+        f[0] = o === 0 && last ? 0 : last ? 2 : 1; f.set(u8.subarray(o, end), 1); c.send(f.buffer);
+        if (last) break;
+      }
+      return true;
+    }
+    function newCode() { var a = 'ABCDEFGHJKLMNPQRSTUVWXYZ', s = ''; for (var i = 0; i < 5; i++) s += a[Math.floor(Math.random() * a.length)]; return s; }
+    function host() {
+      stopHost(); state = 1; err = ''; code = newCode(); tries++;
+      try { peer = new Peer('beltcmd-' + code.toLowerCase(), opts()); } catch (e) { state = 3; err = 'NO WEBRTC IN THIS BROWSER'; return; }
+      peer.on('open', function () { state = 2; tries = 0; url = location.origin + location.pathname + location.search + '#room=' + code; });
+      peer.on('connection', function (c) {
+        var id = nextId++; conns[id] = c;
+        c.on('open', function () { call('_bc_net_event', id, 1); });
+        c.on('data', function (d) { deliver(id, d); });
+        c.on('close', function () { if (conns[id]) { delete conns[id]; delete parts[id]; call('_bc_net_event', id, 2); } });
+        c.on('error', function () { if (conns[id]) { delete conns[id]; delete parts[id]; call('_bc_net_event', id, 2); } });
+      });
+      peer.on('disconnected', function () { if (peer && !peer.destroyed && state === 2) setTimeout(function () { if (peer && !peer.destroyed) peer.reconnect(); }, 1500); });
+      peer.on('error', function (e) {
+        if (e.type === 'unavailable-id' && tries < 6) { host(); return; } // that code is taken: pick another
+        if (e.type === 'peer-unavailable') return;
+        if (state !== 2) { state = 3; err = (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') ? "CAN'T REACH THE INVITE SERVER" : String(e.type || 'ERROR').toUpperCase(); }
+      });
+    }
+    function stopHost() {
+      Object.keys(conns).forEach(function (id) { try { conns[id].close(); } catch (e) {} }); conns = {};
+      if (peer) { try { peer.destroy(); } catch (e) {} } peer = null; state = 0; code = ''; url = ''; showInvite('');
+    }
+    function join(c) {
+      leave(); var done = false;
+      function fail(ev) { if (done) return; done = true; call('_bc_net_event', -1, ev); }
+      try { gpeer = new Peer(opts()); } catch (e) { fail(3); return; }
+      var timer = setTimeout(function () { if (!gconn || !gconn.open) fail(4); }, 20000);
+      gpeer.on('open', function () {
+        gconn = gpeer.connect('beltcmd-' + c.toLowerCase(), { serialization: 'raw', reliable: true });
+        gconn.on('open', function () { clearTimeout(timer); call('_bc_net_event', -1, 1); });
+        gconn.on('data', function (d) { deliver(-1, d); });
+        gconn.on('close', function () { fail(2); });
+        gconn.on('error', function () { fail(3); });
+      });
+      gpeer.on('error', function (e) { clearTimeout(timer); fail(e.type === 'peer-unavailable' ? 4 : 3); });
+    }
+    function leave() { if (gconn) { try { gconn.close(); } catch (e) {} } if (gpeer) { try { gpeer.destroy(); } catch (e) {} } gconn = null; gpeer = null; parts[-1] = []; }
+    // the share button lives in the page so the share sheet / clipboard runs inside a real tap
+    var btn = document.getElementById('invite');
+    function showInvite(u) { inviteUrl = u; btn.style.display = u ? 'block' : 'none'; btn.textContent = 'SHARE INVITE'; }
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation(); if (!inviteUrl) return;
+      if (navigator.share) { navigator.share({ title: 'Belt Command', text: 'Join my Belt Command game', url: inviteUrl }).catch(function () {}); return; }
+      var done = function () { btn.textContent = 'LINK COPIED'; setTimeout(function () { btn.textContent = 'SHARE INVITE'; }, 2000); };
+      if (navigator.clipboard) navigator.clipboard.writeText(inviteUrl).then(done, function () { prompt('Copy this link', inviteUrl); });
+      else prompt('Copy this link', inviteUrl);
+    });
+    ['touchstart', 'mousedown', 'pointerdown'].forEach(function (ev) { btn.addEventListener(ev, function (e) { e.stopPropagation(); }); });
+    return {
+      host: host, stopHost: stopHost, join: join, leave: leave, showInvite: showInvite,
+      send: function (id, u8) { return sendOn(id < 0 ? gconn : conns[id], u8); },
+      drop: function (id) { var c = conns[id]; if (c) setTimeout(function () { try { c.close(); } catch (e) {} }, 300); },
+      status: function () { return state + '|' + code + '|' + err + '|' + url; },
+      invite: function () { return inviteUrl; }
+    };
+  })();
   function wake() { // browsers only allow sound after a click or key press
     try { if (Module.SDL2 && Module.SDL2.audioContext && Module.SDL2.audioContext.state !== 'running') Module.SDL2.audioContext.resume(); } catch (e) {}
   }
-  cover.addEventListener('click', function () { if (cover.classList.contains('loading')) return; cover.style.display = 'none'; canvas.focus(); wake(); });
-  ['mousedown', 'keydown', 'touchstart'].forEach(function (ev) { window.addEventListener(ev, wake, true); });
+  var coarse = window.matchMedia && matchMedia('(pointer: coarse)').matches;
+  function goFull() { // phones: full screen and landscape on the first tap (both need a tap; either may be refused, e.g. on iPhone)
+    var el = document.documentElement, rq = el.requestFullscreen || el.webkitRequestFullscreen;
+    try { var r = rq && rq.call(el, { navigationUI: 'hide' }); if (r && r.then) r.then(function () { try { screen.orientation.lock('landscape').catch(function () {}); } catch (e) {} }, function () {}); } catch (e) {}
+  }
+  cover.addEventListener('click', function () { if (cover.classList.contains('loading')) return; cover.style.display = 'none'; canvas.focus(); wake(); if (coarse) goFull(); });
+  // the browser keeps ESC to leave full screen, so the game never sees it: pause when full screen ends, or when the tab goes to the background
+  function pauseGame() { if (Module._bc_pause) Module._bc_pause(); }
+  document.addEventListener('fullscreenchange', function () { if (!document.fullscreenElement) pauseGame(); });
+  document.addEventListener('webkitfullscreenchange', function () { if (!document.webkitFullscreenElement) pauseGame(); });
+  document.addEventListener('visibilitychange', function () { if (document.hidden) pauseGame(); });
+  ['mousedown', 'keydown', 'touchstart', 'touchend'].forEach(function (ev) { window.addEventListener(ev, wake, true); });
+  document.addEventListener('gesturestart', function (e) { e.preventDefault(); }); // iOS: no page zoom
+  document.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
   // keep game keys from scrolling the page or moving browser focus
   window.addEventListener('keydown', function (e) {
     if (['Tab', 'Space', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown'].indexOf(e.code) >= 0) e.preventDefault();
@@ -58,7 +177,7 @@
     canvas.focus();
   });
 </script>
-<script async type="text/javascript" src="index.js?v=20261028175600"></script>
+<script async type="text/javascript" src="index.js?v=20261101185552"></script>
 </body>
 </html>
 

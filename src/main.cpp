@@ -105,7 +105,7 @@ struct Team {
     int kills = 0, built = 0, ftrLost = 0; bool crystal = false; unsigned found = 0; int order = -1; float orderT = 0; bool dirty = true; std::vector<std::pair<int, int>> links; std::vector<float> linkFlow;
 };
 
-enum { B_A, B_B, B_X, B_Y, B_LB, B_RB, B_START, B_BACK, B_UP, B_DOWN, B_LEFT, B_RIGHT, NB };
+enum { B_A, B_B, B_X, B_Y, B_LB, B_RB, B_START, B_BACK, B_UP, B_DOWN, B_LEFT, B_RIGHT, B_RECYCLE, NB }; // B_RECYCLE: instant recycle (touch button)
 struct Dev {
     int id = -1; SDL_GameController* gc = nullptr; std::string name; bool nintendo = false;
     bool b[NB] = {}, pb[NB] = {};
@@ -402,7 +402,9 @@ static const char* canPlace(int team, int t, V2 q) {
 }
 
 #include "sim.inc"
+#include "touch.h"
 #include "render.inc"
 #include "qr.h"
 #include "net.inc"
+#include "touch.inc"
 #include "ui.inc"
