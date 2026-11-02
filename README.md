@@ -168,7 +168,7 @@ Example: `BC_MUTE=1 SDL_AUDIODRIVER=dummy BC_WINDOW=1920x1080 BC_STATE=game BC_M
 
 ## Status
 
-- 1 Nov 2026 (later): iPhone. The full-screen button can't work in iPhone Safari (Apple doesn't allow it), so it is hidden there and the start screen shows the Add to Home Screen steps, with a PLAY IN SAFARI option and the room code for anyone arriving by invite link (the home screen app opens without the link, so they type the code). Added a web app manifest and home screen icon, and the game now stays inside the iPhone's safe area.
+- 1 Nov 2026 (later): iPhone. The full-screen button can't work in iPhone Safari (Apple doesn't allow it), so it is hidden there and the start screen shows the Add to Home Screen steps, with a PLAY IN SAFARI option and the room code for anyone arriving by invite link (the home screen app opens without the link, so they type the code). Added a web app manifest and home screen icon, and the game now stays inside the iPhone's safe area (first try sized it to the full width, which pushed it off center on Chris's iPhone 12; fixed the same evening).
 
 - 1 Nov 2026: phones and tablets. Touch controls (drag, pinch, tap to place then tap again to build, structure buttons, MAP and PAUSE), a bigger HUD on phones, landscape only, full screen on the first tap. Browsers can host with an invite link (`#room=CODE`, WebRTC through PeerJS). On-screen PAUSE button, and the game pauses when the browser leaves full screen (where Esc never reaches the game) or the tab is hidden. Online protocol is now 2: the box and the website must both be updated. Tested in headless Chromium at phone size (844x390, touch): a browser host with a phone guest, and a phone guest on a box host. Not yet tried on real phones, or over mobile data.
 
