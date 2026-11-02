@@ -19,4 +19,6 @@ grep -q "index.js?v=$V" web/dist/index.html || { echo "build stamp missing in in
 cp art/icon.png web/dist/icon.png
 cp web/peerjs.min.js web/dist/peerjs.min.js
 cp web/manifest.webmanifest web/dist/manifest.webmanifest
+cp web/privacy.html web/dist/privacy.html
+cp THIRD_PARTY_NOTICES.md web/dist/third-party-notices.txt
 ls -la web/dist

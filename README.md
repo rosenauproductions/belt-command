@@ -1,6 +1,8 @@
 # Belt Command
 
-Mine asteroids, power your network, and hold the belt against alien waves. A vector-style mining and defense game for 1 to 4 players in split screen, inspired by the 2009 Flash game *The Space Game*. All art is drawn in code and all sound is synthesized, so the repo has no third-party assets.
+Mine asteroids, power your network, and hold the belt against alien waves. A vector-style mining and defense game for 1 to 4 players in split screen. All art is drawn in code and all sound is synthesized, so the repo has no third-party assets.
+
+Copyright © 2026 Rosenau Productions. All rights reserved (see `LICENSE`). Third-party code and its licenses: `THIRD_PARTY_NOTICES.md`. Privacy: `PRIVACY.md` (also served at `/privacy.html`).
 
 Written in C++17 with SDL2. Runs on Chris's Batocera box (ARCADE-21) as a port.
 
@@ -167,6 +169,8 @@ Run under `xvfb-run` with these environment variables:
 Example: `BC_MUTE=1 SDL_AUDIODRIVER=dummy BC_WINDOW=1920x1080 BC_STATE=game BC_MODE=endless BC_BOTS=1 BC_PLAYERS=4 BC_ADVANCE=300 BC_SHOT=10 BC_SHOT_PATH=shot.bmp xvfb-run -a -s "-screen 0 1920x1080x24" build/bc_test`
 
 ## Status
+
+- 2 Nov 2026: getting ready to sell. Removed every reference to other games from the repo, added `LICENSE` (all rights reserved), `THIRD_PARTY_NOTICES.md` (SDL2 zlib, PeerJS and Emscripten MIT), `PRIVACY.md` and `/privacy.html`, a copyright line on the title screen, credits on HOW TO PLAY, and PRIVACY / LICENSES links on the web start page. Older commits in this private repo still mention the inspiration; squash the history before ever making the repo public.
 
 - 1 Nov 2026 (later): iPhone. The full-screen button can't work in iPhone Safari (Apple doesn't allow it), so it is hidden there and the start screen shows the Add to Home Screen steps, with a PLAY IN SAFARI option and the room code for anyone arriving by invite link (the home screen app opens without the link, so they type the code). Added a web app manifest and home screen icon, and the game now stays inside the iPhone's safe area (first try sized it to the full width, which pushed it off center on Chris's iPhone 12; fixed the same evening).
 

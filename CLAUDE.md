@@ -1,10 +1,12 @@
 # Belt Command: notes for Claude sessions
 
-Chris's asteroid-mining / network-defense game (inspired by The Space Game, 2009) for his Batocera box
+Chris's original asteroid-mining / network-defense game for his Batocera box
 (ARCADE-21, x86_64) and the browser (https://belt-command.vercel.app). C++17 + SDL2, no other libraries; all art is
 drawn in code and all sound is synthesized. `README.md` has modes, structures, controls, build and test switches.
 
 ## Working rules (from Chris)
+- The game is a commercial product (Steam and stores planned). Never name, link or describe it as based on any other game, in code, docs,
+  store text or commits. Keep `THIRD_PARTY_NOTICES.md` current when adding any outside code, and add no outside art, fonts or sounds.
 - New Batocera builds ship as the beta `dist-beta/beltcommand_beta.x86_64`; say the md5. Back up the box copy before replacing it.
 - Show screenshots for anything visual before calling it done.
 - Keep `README.md` (Status section) up to date in plain language.

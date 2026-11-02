@@ -488,6 +488,7 @@ static void renderMenus(Canvas& cv) {
         const char* items[5] = { "PLAY", "JOIN GAME", "HOW TO PLAY", "OPTIONS", "QUIT" };
         menuList(cv, items, NTITLE, G.menuSel, cx, G.H * 0.48f, 34 * u, 62 * u);
         FONT.draw(cv, "1-4 PLAYERS  -  SPLIT SCREEN  -  ONLINE", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.9f), 1);
+        FONT.draw(cv, "(C) 2026 ROSENAU PRODUCTIONS", V2(cx, G.H - 30 * u), 11 * u, withA(C_DIM, 0.6f), 1);
         break;
     }
     case ST_HELP: {
@@ -515,6 +516,7 @@ static void renderMenus(Canvas& cv) {
         drawPanel(cv, cx - 760 * u, 140 * u, 1520 * u, (n * 46 + 40) * u, withA(PCOL[0], 0.5f), u);
         for (int i = 0; i < n; i++) FONT.draw(cv, lines[i], V2(cx, 170 * u + i * 46 * u), 20 * u, i >= 13 ? withA(C_MIN, 0.95f) : withA(C_WHITE, 0.9f), 1);
         FONT.draw(cv, "PRESS A TO GO BACK", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.9f), 1);
+        FONT.draw(cv, "BELT COMMAND (C) 2026 ROSENAU PRODUCTIONS.  USES SDL2 (ZLIB LICENSE) AND PEERJS (MIT LICENSE).", V2(cx, G.H - 30 * u), 11 * u, withA(C_DIM, 0.7f), 1);
         break;
     }
     case ST_OPTIONS: {
