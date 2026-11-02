@@ -68,7 +68,7 @@ source /path/to/emsdk/emsdk_env.sh
 
 `web/dist` is committed, so Vercel serves it as static files with no build step (project root directory `web/dist`). Keyboard + mouse (or touch) is player 1; gamepads join as on Batocera. Settings are kept in the browser's localStorage. Sound starts after the first click or tap (browser rule).
 
-Phones and tablets: landscape only (portrait shows a "turn your phone" screen), full screen on the first tap where the browser allows it (not on iPhone). Touch controls are under Controls. PeerJS (`web/peerjs.min.js`, MIT, version 1.5.5) is copied into `web/dist` by the build for browser-to-browser play.
+Phones and tablets: landscape only (portrait shows a "turn your phone" screen), full screen on the first tap where the browser allows it. iPhone Safari never allows a page to go full screen, so on iPhone the start screen explains Add to Home Screen (the home screen app runs full screen) and offers PLAY IN SAFARI INSTEAD. The game keeps clear of the notch and the home bar. Touch controls are under Controls. PeerJS (`web/peerjs.min.js`, MIT, version 1.5.5) is copied into `web/dist` by the build for browser-to-browser play.
 
 Wii U: see `docs/WIIU_PLAN.md` (on hold).
 
@@ -167,6 +167,8 @@ Run under `xvfb-run` with these environment variables:
 Example: `BC_MUTE=1 SDL_AUDIODRIVER=dummy BC_WINDOW=1920x1080 BC_STATE=game BC_MODE=endless BC_BOTS=1 BC_PLAYERS=4 BC_ADVANCE=300 BC_SHOT=10 BC_SHOT_PATH=shot.bmp xvfb-run -a -s "-screen 0 1920x1080x24" build/bc_test`
 
 ## Status
+
+- 1 Nov 2026 (later): iPhone. The full-screen button can't work in iPhone Safari (Apple doesn't allow it), so it is hidden there and the start screen shows the Add to Home Screen steps, with a PLAY IN SAFARI option and the room code for anyone arriving by invite link (the home screen app opens without the link, so they type the code). Added a web app manifest and home screen icon, and the game now stays inside the iPhone's safe area.
 
 - 1 Nov 2026: phones and tablets. Touch controls (drag, pinch, tap to place then tap again to build, structure buttons, MAP and PAUSE), a bigger HUD on phones, landscape only, full screen on the first tap. Browsers can host with an invite link (`#room=CODE`, WebRTC through PeerJS). On-screen PAUSE button, and the game pauses when the browser leaves full screen (where Esc never reaches the game) or the tab is hidden. Online protocol is now 2: the box and the website must both be updated. Tested in headless Chromium at phone size (844x390, touch): a browser host with a phone guest, and a phone guest on a box host. Not yet tried on real phones, or over mobile data.
 

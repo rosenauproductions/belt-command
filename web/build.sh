@@ -18,4 +18,5 @@ sed -i -e "s/__BUILD__/$V/g" -e "s/src=index.js>/src=index.js?v=$V>/; s/src=\"in
 grep -q "index.js?v=$V" web/dist/index.html || { echo "build stamp missing in index.html"; exit 1; }
 cp art/icon.png web/dist/icon.png
 cp web/peerjs.min.js web/dist/peerjs.min.js
+cp web/manifest.webmanifest web/dist/manifest.webmanifest
 ls -la web/dist

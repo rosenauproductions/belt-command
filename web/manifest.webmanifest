@@ -1,0 +1,12 @@
+{
+  "name": "Belt Command",
+  "short_name": "Belt Command",
+  "description": "Mine asteroids, power your network, hold the belt.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#02040a",
+  "theme_color": "#02040a",
+  "icons": [{ "src": "icon.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" }]
+}

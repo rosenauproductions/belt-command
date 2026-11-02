@@ -757,7 +757,7 @@ static struct { Uint64 last = 0; double acc = 0; float fpsT = 0; int fpsN = 0; }
 static bool frame() {
 #ifdef __EMSCRIPTEN__
     { // follow the browser window size
-        int cw = EM_ASM_INT({ return window.innerWidth; }), ch = EM_ASM_INT({ return window.innerHeight; }); int ww, wh; SDL_GetWindowSize(G.win, &ww, &wh);
+        int cw = EM_ASM_INT({ return typeof safeBox === 'function' ? safeBox()[0] : window.innerWidth; }), ch = EM_ASM_INT({ return typeof safeBox === 'function' ? safeBox()[1] : window.innerHeight; }); /* inside the notch / home bar */ int ww, wh; SDL_GetWindowSize(G.win, &ww, &wh);
         if (cw > 0 && ch > 0 && (cw != ww || ch != wh)) { SDL_SetWindowSize(G.win, cw, ch); setupTarget(); if (G.state == ST_GAME) layoutViews(); }
         if (ch > 0) TC.dpr = (float)G.H / ch;
     }
@@ -870,7 +870,7 @@ static int gameMain() {
     if (getenv("BC_GLOW")) G.opt.glow = atoi(getenv("BC_GLOW")) != 0;
 #ifdef __EMSCRIPTEN__
     SDL_SetHint(SDL_HINT_EMSCRIPTEN_KEYBOARD_ELEMENT, "#canvas");
-    Uint32 wf = SDL_WINDOW_RESIZABLE; int ww = EM_ASM_INT({ return window.innerWidth; }), wh = EM_ASM_INT({ return window.innerHeight; });
+    Uint32 wf = SDL_WINDOW_RESIZABLE; int ww = EM_ASM_INT({ return typeof safeBox === 'function' ? safeBox()[0] : window.innerWidth; }), wh = EM_ASM_INT({ return typeof safeBox === 'function' ? safeBox()[1] : window.innerHeight; });
 #else
     Uint32 wf = SDL_WINDOW_FULLSCREEN_DESKTOP; int ww = 1280, wh = 720;
 #endif

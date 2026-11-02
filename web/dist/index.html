@@ -5,14 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Belt Command">
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="manifest" href="manifest.webmanifest">
 <title>Belt Command</title>
 <meta name="description" content="Mine asteroids, power your network, hold the belt. Vector mining and defense for 1-4 players, split screen. Keyboard, mouse and gamepads.">
 <meta name="theme-color" content="#02040a">
 <link rel="icon" type="image/png" href="icon.png">
 <style>
   html, body { margin: 0; height: 100%; background: #02040a; overflow: hidden; overscroll-behavior: none; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
-  canvas#canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; outline: none; background: #02040a; }
+  /* the game stays inside the safe area (clear of the iPhone notch and home bar); its size comes from the page (see safeBox) */
+  canvas#canvas { position: fixed; left: env(safe-area-inset-left, 0px); top: env(safe-area-inset-top, 0px); width: 100vw; height: 100vh; display: block; outline: none; background: #02040a; }
+  #safe { position: fixed; inset: 0; visibility: hidden; pointer-events: none;
+          padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); }
   #cover { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
            background: radial-gradient(ellipse at center, #08142a 0%, #02040a 70%); color: #8fe8ff; font: 600 16px/1.4 ui-monospace, Menlo, Consolas, monospace;
            letter-spacing: 0.12em; text-align: center; cursor: pointer; user-select: none; z-index: 2; }
@@ -21,7 +27,22 @@
   #cover .go { margin-top: 10px; padding: 12px 28px; border: 2px solid #28dcff; border-radius: 4px; color: #fff; box-shadow: 0 0 16px rgba(40,220,255,.45); }
   #cover .help { color: #7887a0; font-size: 13px; max-width: 640px; padding: 0 16px; }
   #cover.loading .go { opacity: .4; }
-  #fs { position: fixed; right: 10px; bottom: 10px; z-index: 3; width: 34px; height: 34px; border: 1px solid #3c5070; border-radius: 4px; background: rgba(6,10,18,.7);
+  @media (pointer: coarse) { #cover .help .kb { display: none; } }
+  /* iPhone in Safari: web pages can't go full screen there, so we explain the home screen shortcut instead */
+  #ios { display: none; flex-direction: column; align-items: center; gap: 10px; max-width: 560px; padding: 12px 18px; border: 1px solid #3c5070; border-radius: 6px;
+         background: rgba(6,10,18,.8); color: #cfe9ff; font-size: 13px; letter-spacing: .06em; cursor: default; }
+  #ios b { color: #28dcff; font-weight: 600; }
+  #ios .steps { display: flex; gap: 18px; align-items: center; justify-content: center; flex-wrap: wrap; }
+  #ios .step { display: flex; align-items: center; gap: 8px; }
+  #ios .n { display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center; border: 1px solid #28dcff; border-radius: 50%; color: #28dcff; font-size: 12px; }
+  #ios svg { width: 20px; height: 20px; vertical-align: -4px; }
+  #ios .anyway { color: #7887a0; text-decoration: underline; cursor: pointer; padding: 4px 10px; }
+  body.ios-safari #ios { display: flex; }
+  body.ios-safari #cover .go, body.ios-safari #cover .help, body.ios #fs { display: none; }
+  body.ios-safari.anyway #cover .go { display: block; }
+  body.ios-safari.anyway #ios .steps, body.ios-safari.anyway #ios .anyway { display: none; }
+  @media (max-height: 430px) { #cover { gap: 10px; } #cover h1 { font-size: 40px; } }
+  #fs { position: fixed; right: calc(10px + env(safe-area-inset-right, 0px)); bottom: calc(10px + env(safe-area-inset-bottom, 0px)); z-index: 3; width: 34px; height: 34px; border: 1px solid #3c5070; border-radius: 4px; background: rgba(6,10,18,.7);
         color: #8fe8ff; font-size: 18px; cursor: pointer; opacity: .45; }
   #fs:hover { opacity: 1; }
   #rotate { position: fixed; inset: 0; z-index: 5; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
@@ -29,7 +50,7 @@
   #rotate .ph { width: 60px; height: 100px; border: 3px solid #28dcff; border-radius: 10px; box-shadow: 0 0 16px rgba(40,220,255,.5); animation: turn 2.2s ease-in-out infinite; }
   @keyframes turn { 0%, 30% { transform: rotate(0deg); } 60%, 100% { transform: rotate(-90deg); } }
   @media (orientation: portrait) and (pointer: coarse) { #rotate { display: flex; } }
-  #invite { position: fixed; top: 12px; right: 12px; z-index: 3; display: none; padding: 10px 16px; border: 2px solid #28dcff; border-radius: 4px;
+  #invite { position: fixed; top: calc(12px + env(safe-area-inset-top, 0px)); right: calc(12px + env(safe-area-inset-right, 0px)); z-index: 3; display: none; padding: 10px 16px; border: 2px solid #28dcff; border-radius: 4px;
             background: rgba(6,10,18,.85); color: #fff; font: 600 14px ui-monospace, Menlo, Consolas, monospace; letter-spacing: .1em; cursor: pointer;
             box-shadow: 0 0 14px rgba(40,220,255,.4); }
 </style>
@@ -40,22 +61,51 @@
   <h1>BELT COMMAND</h1>
   <div class="tag">MINE &nbsp;-&nbsp; POWER &nbsp;-&nbsp; DEFEND</div>
   <div class="go" id="go">LOADING...</div>
-  <div class="help">KEYBOARD + MOUSE: the mouse points, WASD or arrows scroll the map, click or SPACE to build, click the icons (or Q/E, 1-0) to choose, U upgrade, hold R recycle, right-click ping, wheel zoom, TAB map, ESC pause. Menus work with the mouse too.<br>
-  GAMEPADS: plug in up to 4 and press A on each to join. Split screen on one display.<br>
+  <div id="ios" onclick="event.stopPropagation()">
+    <div><b>FULL SCREEN ON IPHONE:</b> ADD BELT COMMAND TO YOUR HOME SCREEN</div>
+    <div class="steps">
+      <div class="step"><span class="n">1</span> TAP SHARE <svg viewBox="0 0 24 24" fill="none" stroke="#28dcff" stroke-width="2"><path d="M12 3v12M7 8l5-5 5 5"/><path d="M5 11v9h14v-9"/></svg></div>
+      <div class="step"><span class="n">2</span> ADD TO HOME SCREEN</div>
+      <div class="step"><span class="n">3</span> OPEN IT FROM YOUR HOME SCREEN</div>
+    </div>
+    <div id="iosroom" style="display:none;color:#be8cff"></div>
+    <div class="anyway" id="anyway">PLAY IN SAFARI INSTEAD (NOT FULL SCREEN)</div>
+  </div>
+  <div class="help"><span class="kb">KEYBOARD + MOUSE: the mouse points, WASD or arrows scroll the map, click or SPACE to build, click the icons (or Q/E, 1-0) to choose, U upgrade, hold R recycle, right-click ping, wheel zoom, TAB map, ESC pause. Menus work with the mouse too.<br>
+  GAMEPADS: plug in up to 4 and press A on each to join. Split screen on one display.<br></span>
   TOUCH: drag to move, pinch to zoom, tap an icon then tap the map to place it, tap again to build. Tap a structure to upgrade or recycle.</div>
 </div>
+<div id="safe"></div>
 <button id="fs" title="Full screen">&#x26F6;</button>
 <button id="invite">SHARE INVITE</button>
 <div id="rotate"><div class="ph"></div><div>TURN YOUR PHONE SIDEWAYS</div><div style="color:#7887a0;font-size:13px">BELT COMMAND PLAYS IN LANDSCAPE</div></div>
-<script src="peerjs.min.js?v=20261101185552"></script>
+<script src="peerjs.min.js?v=20261101191906"></script>
 <script>
   var cover = document.getElementById('cover'), go = document.getElementById('go'), canvas = document.getElementById('canvas');
+  // iPhone / iPod (iPads report as Macs with touch): Safari there has no full screen for pages; the home screen shortcut does
+  var isIOS = /iPhone|iPod/.test(navigator.userAgent) || (/iPad/.test(navigator.userAgent)) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  var standalone = navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches);
+  var canFull = !!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen) && !/iPhone|iPod/.test(navigator.userAgent);
+  if (isIOS) document.body.classList.add('ios');
+  if (isIOS && !standalone && !canFull) {
+    document.body.classList.add('ios-safari');
+    var rm = /#(room|join)=([A-Za-z0-9.-]+)/.exec(location.hash);
+    if (rm) { var ir = document.getElementById('iosroom'); ir.style.display = 'block'; ir.textContent = 'JOINING A GAME? IN THE HOME SCREEN APP: JOIN GAME > ENTER CODE ' + rm[2].toUpperCase() + ' - OR JUST PLAY IN SAFARI'; }
+    document.getElementById('anyway').addEventListener('click', function (e) { e.stopPropagation(); document.body.classList.add('anyway'); });
+  }
+  // the area the game may use: the window minus the notch / home bar insets
+  var safeEl = null;
+  function safeBox() {
+    safeEl = safeEl || document.getElementById('safe');
+    var cs = getComputedStyle(safeEl), l = parseFloat(cs.paddingLeft) || 0, r = parseFloat(cs.paddingRight) || 0, t = parseFloat(cs.paddingTop) || 0, b = parseFloat(cs.paddingBottom) || 0;
+    return [Math.max(1, Math.floor(window.innerWidth - l - r)), Math.max(1, Math.floor(window.innerHeight - t - b))];
+  }
   var Module = {
     canvas: canvas,
-    locateFile: function (f) { return f + '?v=20261101185552'; }, // new build = new URL, so a cached old index.wasm is never used
+    locateFile: function (f) { return f + '?v=20261101191906'; }, // new build = new URL, so a cached old index.wasm is never used
     print: function (t) { console.log(t); },
     printErr: function (t) { console.warn(t); },
-    onRuntimeInitialized: function () { cover.classList.remove('loading'); go.textContent = 'CLICK TO PLAY'; if (Module._bc_main) Module._bc_main(); }
+    onRuntimeInitialized: function () { cover.classList.remove('loading'); go.textContent = window.matchMedia && matchMedia('(pointer: coarse)').matches ? 'TAP TO PLAY' : 'CLICK TO PLAY'; if (Module._bc_main) Module._bc_main(); }
   };
 
   // ---- online play between browsers (WebRTC through PeerJS): a browser can host a room and others join by link (#room=CODE).
@@ -157,7 +207,9 @@
     var el = document.documentElement, rq = el.requestFullscreen || el.webkitRequestFullscreen;
     try { var r = rq && rq.call(el, { navigationUI: 'hide' }); if (r && r.then) r.then(function () { try { screen.orientation.lock('landscape').catch(function () {}); } catch (e) {} }, function () {}); } catch (e) {}
   }
-  cover.addEventListener('click', function () { if (cover.classList.contains('loading')) return; cover.style.display = 'none'; canvas.focus(); wake(); if (coarse) goFull(); });
+  cover.addEventListener('click', function () { if (cover.classList.contains('loading')) return;
+    if (document.body.classList.contains('ios-safari') && !document.body.classList.contains('anyway')) return; /* show the steps until they choose */
+    cover.style.display = 'none'; canvas.focus(); wake(); if (coarse) goFull(); });
   // the browser keeps ESC to leave full screen, so the game never sees it: pause when full screen ends, or when the tab goes to the background
   function pauseGame() { if (Module._bc_pause) Module._bc_pause(); }
   document.addEventListener('fullscreenchange', function () { if (!document.fullscreenElement) pauseGame(); });
@@ -177,7 +229,7 @@
     canvas.focus();
   });
 </script>
-<script async type="text/javascript" src="index.js?v=20261101185552"></script>
+<script async type="text/javascript" src="index.js?v=20261101191906"></script>
 </body>
 </html>
 
