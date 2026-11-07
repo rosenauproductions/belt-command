@@ -2,11 +2,11 @@
 
 static int PADTEST_HITS = 0; // BC_PADTEST: how many RB presses the game acted on
 #ifdef __EMSCRIPTEN__
-static const int NTITLE = 4; // a web page has nothing to quit to
+static const int NTITLE = 5; // a web page has nothing to quit to
 #else
-static const int NTITLE = 5;
+static const int NTITLE = 6;
 #endif
-enum { TI_PLAY, TI_JOIN, TI_HELP, TI_OPTIONS, TI_QUIT };
+enum { TI_PLAY, TI_TUTORIAL, TI_JOIN, TI_HELP, TI_OPTIONS, TI_QUIT };
 static Dev* devById(int id) { for (auto& d : G.devs) if (d.id == id) return &d; return nullptr; }
 static Dev* kbd() { return devById(-1); }
 // a press counts exactly once: latched until the next game step or menu update uses it
@@ -245,7 +245,7 @@ static void menuList(Canvas& cv, const char** items, int n, int sel, float cx, f
     }
 }
 
-static void enterLobby() { G.state = ST_LOBBY; G.stateT = 0; G.menuSel = 0; }
+static void enterLobby() { G.state = ST_LOBBY; G.stateT = 0; G.menuSel = 0; G.tutorial = false; }
 static int joinedCount() { int n = 0; for (auto& p : G.pl) if (p.joined) n++; return n; }
 static void joinPlayer(int devId, bool cpu) {
     for (int i = 0; i < 4; i++) if (!G.pl[i].joined) {
@@ -402,6 +402,11 @@ static void updateMenus(float dt) {
         { bool c; menuMouse(G.menuSel, c); if (c) m.a = true; }
         if (m.a || m.start) {
             AU.play(SND_UI_OK, 0.7f);
+            if (G.menuSel == TI_TUTORIAL) { // one player: whoever picked it (mouse, touch and keyboard are the keyboard player)
+                int dev = m.devA != -99 ? m.devA : -1;
+                for (auto& p : G.pl) p = Player();
+                joinPlayer(dev, false); G.tutorial = true; startGame(); break;
+            }
             if (G.menuSel == TI_PLAY) enterLobby(); else if (G.menuSel == TI_JOIN) { G.state = ST_JOIN; G.menuSel = 0; G.stateT = 0; LANS.clear(); }
             else if (G.menuSel == TI_HELP) { G.state = ST_HELP; G.stateT = 0; } else if (G.menuSel == TI_OPTIONS) { G.state = ST_OPTIONS; G.menuSel = 0; } else G.quit = true;
         }
@@ -485,7 +490,7 @@ static void renderMenus(Canvas& cv) {
     switch (G.state) {
     case ST_TITLE: {
         drawLogo(cv, cx, G.H * 0.2f, 96 * u);
-        const char* items[5] = { "PLAY", "JOIN GAME", "HOW TO PLAY", "OPTIONS", "QUIT" };
+        const char* items[6] = { "PLAY", G.opt.tutDone ? "TUTORIAL" : "TUTORIAL  (START HERE)", "JOIN GAME", "HOW TO PLAY", "OPTIONS", "QUIT" };
         menuList(cv, items, NTITLE, G.menuSel, cx, G.H * 0.48f, 34 * u, 62 * u);
         FONT.draw(cv, "1-4 PLAYERS  -  SPLIT SCREEN  -  ONLINE", V2(cx, G.H - 60 * u), 16 * u, withA(C_DIM, 0.9f), 1);
         FONT.draw(cv, "(C) 2026 ROSENAU PRODUCTIONS", V2(cx, G.H - 30 * u), 11 * u, withA(C_DIM, 0.6f), 1);
@@ -575,8 +580,12 @@ static void renderMenus(Canvas& cv) {
           FONT.draw(cv, "+ CPU", V2(LB.ax + cw / 2, by + 22 * u), 20 * u, joinedCount() < 4 ? withA(C_WHITE, 0.85f) : C_DIM, 1);
           drawPanel(cv, LB.rx, by, cw, bh, anyCpu ? withA(C_WHITE, 0.6f) : withA(C_DIM, 0.4f), u);
           FONT.draw(cv, "- CPU", V2(LB.rx + cw / 2, by + 22 * u), 20 * u, anyCpu ? withA(C_WHITE, 0.85f) : C_DIM, 1); }
-        const char* md = G.mode == MODE_COOP ? "SHARE ONE BASE AND ONE STOCKPILE. PLAY THE MISSIONS." : G.mode == MODE_ENDLESS ? "SHARE ONE BASE. THE WAVES NEVER STOP." : G.mode == MODE_VERSUS ? "EVERYONE BUILDS THEIR OWN BASE. TURRETS FIRE ON RIVALS TOO." : "NO ALIENS. YOUR FRIENDS ARE THE RIVALS. FIND THEIR BASES AND SEND CARRIER FIGHTERS.";
+        const char* md = G.mode == MODE_COOP ? "SHARE ONE BASE AND ONE STOCKPILE. PLAY THE MISSIONS." : G.mode == MODE_ENDLESS ? "SHARE ONE BASE. THE WAVES NEVER STOP." : G.mode == MODE_VERSUS ? "EVERYONE BUILDS THEIR OWN BASE. TURRETS FIRE ON RIVALS TOO." : G.mode == MODE_DAILY ? "ONE NEW BELT EVERY DAY, THE SAME FOR EVERYONE. SHARE ONE BASE AND SURVIVE." : "NO ALIENS. YOUR FRIENDS ARE THE RIVALS. FIND THEIR BASES AND SEND CARRIER FIGHTERS.";
         FONT.draw(cv, md, V2(cx, my + 56 * u), 18 * u, withA(C_WHITE, 0.85f), 1);
+        if (G.mode == MODE_DAILY) {
+            std::string dl = dailyLobbyLine(); FONT.draw(cv, dl.c_str(), V2(cx, my + 88 * u), std::min(16 * u, 16 * u * G.W * 0.9f / std::max(1.f, Font::width(dl.c_str(), 16 * u))), C_MIN, 1);
+            if (!GS.on && G.opt.dailyDay == todayUTC() && G.opt.dailyTries > 0) FONT.draw(cv, ("TODAY'S BEST " + mmss((float)G.opt.dailyBest) + "   -   TRIES " + std::to_string(G.opt.dailyTries)).c_str(), V2(cx, my + 228 * u), 15 * u, withA(C_WHITE, 0.75f), 1);
+        }
         if (G.mode == MODE_ENDLESS && G.opt.bestEndless > 0) FONT.draw(cv, ("BEST " + mmss((float)G.opt.bestEndless)).c_str(), V2(cx, my + 92 * u), 16 * u, C_MIN, 1);
         if (GS.on) FONT.draw(cv, "THE HOST PICKS THE MODE AND STARTS   -   B LEAVE THE GAME", V2(cx, G.H - 70 * u), 16 * u, withA(C_DIM, 0.95f), 1);
         else { drawHostPanel(cv, u); FONT.draw(cv, "A JOIN    B LEAVE    LEFT/RIGHT MODE    X ADD CPU    Y REMOVE CPU" BACKHINT "    START BEGIN", V2(cx, G.H - 40 * u), 15 * u, withA(C_DIM, 0.95f), 1); }
@@ -607,12 +616,17 @@ static void updateOverlay(float dt) {
     MenuIn m = menuInput();
     if (G.result) {
         G.resultT += dt; if (G.resultT < 1.6f) return;
-        bool canNext = G.mode == MODE_COOP && G.result == 1 && G.mission + 1 < NMISSIONS;
+        bool canNext = G.mode == MODE_COOP && !G.tutorial && G.result == 1 && G.mission + 1 < NMISSIONS;
         int n = canNext ? 3 : 2;
         if (m.y) { G.resultSel = (G.resultSel + m.y + n) % n; AU.play(SND_UI, 0.6f); }
         { bool c; menuMouse(G.resultSel, c); if (c) m.a = true; }
         if (m.a || m.start) {
             AU.play(SND_UI_OK, 0.7f);
+            if (G.tutorial) { // won: first mission, or title; lost: try again, or title
+                if (G.resultSel == 0) { if (G.result == 1) { G.tutorial = false; G.mode = MODE_COOP; G.mission = 0; } startGame(); }
+                else { G.tutorial = false; for (auto& p : G.pl) p = Player(); G.state = ST_TITLE; G.menuSel = TI_PLAY; G.stateT = 0; }
+                return;
+            }
             int opt = canNext ? G.resultSel : (G.resultSel == 0 ? 0 : 2);
             if (opt == 0) startGame(); else if (opt == 1) { G.mission++; startGame(); } else { for (auto& p : G.pl) if (p.joined && p.cpu && !p.view) {} enterLobby(); }
         }
@@ -624,7 +638,7 @@ static void updateOverlay(float dt) {
         if (m.b || (m.start && G.pauseSel == 0)) { G.paused = false; AU.play(SND_UI, 0.6f); return; }
         if (m.a || m.start) {
             AU.play(SND_UI_OK, 0.7f);
-            if (G.pauseSel == 0) G.paused = false; else if (G.pauseSel == 1) startGame(); else { G.paused = false; G.state = ST_TITLE; G.menuSel = 0; G.stateT = 0; }
+            if (G.pauseSel == 0) G.paused = false; else if (G.pauseSel == 1) startGame(); else { G.paused = false; if (G.tutorial) { G.tutorial = false; for (auto& p : G.pl) p = Player(); } G.state = ST_TITLE; G.menuSel = 0; G.stateT = 0; }
         }
     }
 }
@@ -642,6 +656,8 @@ static void renderOverlay(Canvas& cv) {
         cv.rect(0, 0, (float)G.W, (float)G.H, Col(0, 0, 0, (int)(170 * a)));
         std::string title; Col tc = PCOL[0];
         if (rivals()) { if (G.winner >= 0) { for (auto& p : G.pl) if (p.joined && p.team == G.winner) { title = p.remote ? p.name + " WINS" : std::string(p.cpu ? "CPU " : "") + "P" + std::to_string(p.idx + 1) + " WINS"; tc = p.col; } } else title = "DRAW"; }
+        else if (G.tutorial) title = G.result == 1 ? "TUTORIAL COMPLETE" : "COMMAND LOST";
+        else if (G.mode == MODE_DAILY) title = G.dailyNewBest ? "NEW BEST TODAY" : "THE BELT IS LOST";
         else title = G.result == 1 ? "MISSION COMPLETE" : (G.mode == MODE_ENDLESS ? "THE BELT IS LOST" : "MISSION FAILED");
         if (G.result == 2) tc = C_BAD;
         FONT.draw(cv, title.c_str(), V2(cx, G.H * 0.2f), 64 * u, withA(tc, a), 1, 0, 1.2f);
@@ -652,12 +668,19 @@ static void renderOverlay(Canvas& cv) {
             snprintf(b, sizeof b, "%s   MINED %d   KILLS %d   BUILT %d   FIGHTERS LOST %d   TIME %s", rivals() ? ("TEAM " + std::to_string(t + 1)).c_str() : "", (int)T.mined, T.kills, T.built, T.ftrLost, mmss(G.time).c_str());
             FONT.draw(cv, b, V2(cx, y + t * 40 * u), 20 * u, withA(T.col, a), 1);
         }
+        if (G.mode == MODE_DAILY) { // today's challenge: best and tries
+            std::string dl = "DAILY CHALLENGE  " + dayText(G.dailyDay);
+            if (!GS.on && G.opt.dailyDay == G.dailyDay) dl += "   -   TODAY'S BEST " + mmss((float)G.opt.dailyBest) + "   -   TRY " + std::to_string(G.opt.dailyTries);
+            FONT.draw(cv, dl.c_str(), V2(cx, y + G.nTeams * 40 * u + 20 * u), 18 * u, withA(C_MIN, a), 1);
+        }
         if (G.resultT > 1.6f && GS.on) FONT.draw(cv, "WAITING FOR THE HOST", V2(cx, G.H * 0.7f), 26 * u, withA(PCOL[0], 0.6f + 0.4f * std::sin(G.stateT * 3)), 1);
         else if (G.resultT > 1.6f) {
-            bool canNext = G.mode == MODE_COOP && G.result == 1 && G.mission + 1 < NMISSIONS;
+            bool canNext = G.mode == MODE_COOP && !G.tutorial && G.result == 1 && G.mission + 1 < NMISSIONS;
+            const char* it[2] = { G.result == 1 ? "PLAY THE FIRST MISSION" : "TRY AGAIN", "BACK TO TITLE" };
             const char* i3[3] = { "RETRY", "NEXT MISSION", "BACK TO LOBBY" };
             const char* i2[2] = { "PLAY AGAIN", "BACK TO LOBBY" };
-            if (canNext) menuList(cv, i3, 3, G.resultSel, cx, G.H * 0.66f, 28 * u, 54 * u); else menuList(cv, i2, 2, G.resultSel, cx, G.H * 0.66f, 28 * u, 54 * u);
+            if (G.tutorial) menuList(cv, it, 2, G.resultSel, cx, G.H * 0.66f, 28 * u, 54 * u);
+            else if (canNext) menuList(cv, i3, 3, G.resultSel, cx, G.H * 0.66f, 28 * u, 54 * u); else menuList(cv, i2, 2, G.resultSel, cx, G.H * 0.66f, 28 * u, 54 * u);
         }
     }
     cv.flush(G.ren);
@@ -730,7 +753,8 @@ static void testSetup() {
     std::string s = st;
     int n = getenv("BC_PLAYERS") ? atoi(getenv("BC_PLAYERS")) : 1;
     int cpus = getenv("BC_CPUS") ? atoi(getenv("BC_CPUS")) : 0;
-    if (getenv("BC_MODE")) { std::string m = getenv("BC_MODE"); G.mode = m == "raid" ? MODE_RAID : m == "versus" ? MODE_VERSUS : m == "endless" ? MODE_ENDLESS : MODE_COOP; }
+    if (getenv("BC_MODE")) { std::string m = getenv("BC_MODE"); G.mode = m == "raid" ? MODE_RAID : m == "versus" ? MODE_VERSUS : m == "endless" ? MODE_ENDLESS : m == "daily" ? MODE_DAILY : MODE_COOP; }
+    if (getenv("BC_TUTORIAL")) G.tutorial = true;
     if (getenv("BC_MISSION")) G.mission = atoi(getenv("BC_MISSION"));
     if (s == "title") return;
     if (s == "icon") { G.state = ST_ICON; return; }
@@ -809,7 +833,7 @@ static bool frame() {
         fpsT += (float)dt; fpsN++; if (fpsT > 30) { printf("fps: %.1f (enemies %d, structures %d, particles %d)\n", fpsN / fpsT, (int)G.en.size(), (int)G.st.size(), (int)G.parts.size()); fpsT = 0; fpsN = 0; }
 #ifdef __EMSCRIPTEN__
         { // a browser hosts an invite room while it is in the lobby or a game (not when it is someone else's guest)
-            bool want = !GS.on && (G.state == ST_LOBBY || G.state == ST_MISSIONS || G.state == ST_GAME);
+            bool want = !GS.on && !G.tutorial && (G.state == ST_LOBBY || G.state == ST_MISSIONS || G.state == ST_GAME);
             if (want && NH.rstate == 0) rtcHostStart(); else if (!want && NH.rstate) rtcHostStop();
         }
 #endif

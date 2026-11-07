@@ -34,7 +34,7 @@
 #include <emscripten/websocket.h>
 #endif
 
-static const int NET_PROTO = 2, NET_PORT = 8095, NET_DISC_PORT = 8096, REMOTE_DEV = 2000;
+static const int NET_PROTO = 3, NET_PORT = 8095, NET_DISC_PORT = 8096, REMOTE_DEV = 2000;
 static const char* WEB_SITE = "https://belt-command.vercel.app";
 enum { MSG_JOIN = 'J', MSG_INPUT = 'I', MSG_WELCOME = 'W', MSG_SNAP = 'S', MSG_KEEP = 'K' };
 
@@ -97,7 +97,7 @@ static struct { std::vector<std::string> st; std::vector<std::string> ast; std::
 
 // common head: screen, lobby, players; world globals and teams when in a game
 static void writeHead(WBuf& w) {
-    w.u8(hostScreen()); w.u8(G.mode); w.u8(G.mission); w.u8(G.menuSel); w.u32(G.opt.done);
+    w.u8(hostScreen()); w.u8(G.mode); w.u8(G.mission); w.u8(G.menuSel); w.u32(G.opt.done); w.u32(G.dailyDay); w.u8(G.tutorial ? 1 : 0);
     w.u8(G.paused ? 1 : 0); w.u8(G.result); w.u8((uint8_t)(int8_t)G.winner); w.f32(G.resultT); w.u8(G.resultSel); w.str(G.resultMsg);
     w.u16(G.gameId & 0xffff);
     for (auto& p : G.pl) {
@@ -682,7 +682,7 @@ static std::string joinUrl(std::string t, std::string& err) {
     return "ws://" + t + "/ws";
 }
 static void guestLeave(const std::string& why = "") {
-    linkClose(); GS.on = false; GS.welcomed = false; GS.haveWorld = false; GS.leaveAsk = false;
+    linkClose(); GS.on = false; GS.welcomed = false; GS.haveWorld = false; GS.leaveAsk = false; G.tutorial = false; if (G.mode >= MODE_N) G.mode = MODE_COOP;
     for (auto& p : G.pl) p = Player();
     G.st.clear(); G.en.clear(); G.fi.clear(); G.bl.clear(); G.ast.clear(); G.parts.clear(); G.beams.clear(); G.warns.clear(); G.pings.clear();
     G.paused = false; G.result = 0;
@@ -721,7 +721,7 @@ static void guestEvents(RBuf& r, size_t end) {
 static void guestSnapshot(const std::string& m) {
     RBuf r(m, 1);
     int flags = r.u8(); bool full = flags & 1, inGame = flags & 2;
-    int scr = r.u8(); G.mode = std::min(r.u8(), MODE_N - 1); G.mission = std::min(r.u8(), NMISSIONS - 1); int msel = r.u8(); GS.hostDone = r.u32();
+    int scr = r.u8(); G.mode = std::min(r.u8(), MODE_N - 1); G.mission = std::min(r.u8(), NMISSIONS - 1); int msel = r.u8(); GS.hostDone = r.u32(); G.dailyDay = r.u32(); G.tutorial = r.u8() != 0;
     G.paused = r.u8() != 0; int result = r.u8(); G.winner = (int8_t)r.u8(); float resT = r.f32(); G.resultSel = r.u8(); G.resultMsg = r.str();
     int gid = r.u16();
     for (int i = 0; i < 4; i++) {
@@ -741,7 +741,7 @@ static void guestSnapshot(const std::string& m) {
     if (newGame && !full) return; // wait for the full picture of the new game
     if (newGame) {
         GS.gameId = gid; G.parts.clear(); G.beams.clear(); G.result = 0; GS.lastResult = 0; GS.leaveAsk = false;
-        G.M = G.mode == MODE_RAID ? M_RAID : G.mode == MODE_VERSUS ? M_VERSUS : G.mode == MODE_ENDLESS ? M_ENDLESS : MISSIONS[G.mission];
+        G.M = currentMission();
     }
     G.WW = r.f32(); G.WH = r.f32(); G.nTeams = std::min(4, std::max(1, r.u8())); G.time = r.f32(); G.waveN = r.u16(); G.waveT = r.f32(); G.alertT = r.f32();
     G.motherUid = (int)r.u32(); G.motherSpawned = r.u8() != 0; G.crystalOut = r.u8() != 0;

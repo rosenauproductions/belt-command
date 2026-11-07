@@ -606,6 +606,8 @@ static void finish(int result, int winner, const std::string& msg) {
     AU.play(result == 1 ? SND_WIN : SND_LOSE, 0.9f);
     if (result == 1 && G.mode == MODE_COOP) { G.opt.done |= 1u << G.mission; saveCfg(); }
     if (G.mode == MODE_ENDLESS && (int)G.time > G.opt.bestEndless) { G.opt.bestEndless = (int)G.time; saveCfg(); }
+    if (G.mode == MODE_DAILY && G.opt.dailyDay == G.dailyDay && (int)G.time > G.opt.dailyBest) { G.opt.dailyBest = (int)G.time; G.dailyNewBest = true; saveCfg(); }
+    if (G.tutorial && result == 1 && !G.opt.tutDone) { G.opt.tutDone = true; saveCfg(); }
 }
 static void checkEnd() {
     if (G.result) return;
@@ -617,11 +619,12 @@ static void checkEnd() {
         return;
     }
     Team& T = G.teams[0];
-    if (!T.alive) { finish(2, -1, G.mode == MODE_ENDLESS ? "SURVIVED " + std::to_string((int)G.time / 60) + ":" + (((int)G.time % 60) < 10 ? "0" : "") + std::to_string((int)G.time % 60) : "COMMAND DESTROYED"); return; }
+    if (!T.alive) { finish(2, -1, G.mode == MODE_ENDLESS || G.mode == MODE_DAILY ? "SURVIVED " + std::to_string((int)G.time / 60) + ":" + (((int)G.time % 60) < 10 ? "0" : "") + std::to_string((int)G.time % 60) : "COMMAND DESTROYED"); return; }
     switch (G.M.obj) {
     case OBJ_MINE: if (T.mined >= G.M.target) finish(1, 0, "MINING QUOTA MET"); break;
     case OBJ_SURVIVE: if (G.time >= G.M.target) finish(1, 0, "YOU HELD THE BELT"); break;
     case OBJ_MOTHER: if (G.motherSpawned && !enemyByUid(G.motherUid)) finish(1, 0, "MOTHERSHIP DESTROYED"); break;
+    case OBJ_TUTORIAL: break; // the tutorial script finishes it (modes.inc)
     }
 }
 
@@ -630,6 +633,7 @@ static void stepWorld(float dt) {
     G.time += dt;
     updateStructs(dt);
     if (!raid()) updateWaves(dt);
+    if (G.tutorial) tutUpdate(dt);
     updateEnemies(dt);
     updateFighters(dt);
     updateSight(dt);
@@ -654,13 +658,17 @@ static void layoutViews() {
     }
 }
 static void startGame() {
-    G.M = G.mode == MODE_RAID ? M_RAID : G.mode == MODE_VERSUS ? M_VERSUS : G.mode == MODE_ENDLESS ? M_ENDLESS : MISSIONS[G.mission];
+    if (G.mode == MODE_DAILY) G.dailyDay = todayUTC();
+    if (G.tutorial) G.mode = MODE_COOP;
+    G.M = currentMission(); G.dailyNewBest = false;
     G.st.clear(); G.en.clear(); G.bl.clear(); G.parts.clear(); G.beams.clear(); G.warns.clear(); G.pings.clear(); G.fi.clear(); G.seeT = 0; G.crystalOut = false;
     G.time = 0; G.waveN = 0; G.waveT = G.M.first; G.motherUid = -1; G.motherWarned = G.motherSpawned = false;
     G.result = 0; G.paused = false; G.uidNext = 1; G.gameId++;
     for (auto& t : G.teams) t = Team();
     R.s = (uint32_t)(SDL_GetTicks() * 2654435761u) | 1;
     if (getenv("BC_SEED")) R.s = (uint32_t)atoi(getenv("BC_SEED")) | 1;
+    if (G.mode == MODE_DAILY) R.s = dayHash(G.dailyDay, 99) | 1; // everyone gets the same belt today
+    if (G.tutorial) R.s = 20261107u | 1; // the same calm belt every time
     int idx = 0, nj = 0;
     for (auto& q : G.pl) if (q.joined) { q.team = rivals() ? idx : 0; idx++; nj++; }
     G.nTeams = rivals() ? idx : 1;
@@ -669,6 +677,7 @@ static void startGame() {
         T.col = PCOL[0];
         if (rivals()) for (auto& q : G.pl) if (q.joined && q.team == t) T.col = q.col;
         T.minerals = rivals() ? 220 : 200 + 80.f * (nj - 1); T.energy = 150;
+        T.minerals = std::max(60.f, T.minerals + G.M.startMin);
     }
     genWorld();
     for (int t = 0; t < G.nTeams; t++) recomputeNet(t);
@@ -678,5 +687,7 @@ static void startGame() {
     }
     layoutViews();
     G.state = ST_GAME; G.stateT = 0;
+    if (G.tutorial) tutStart();
+    if (G.mode == MODE_DAILY) { if (G.opt.dailyDay != G.dailyDay) { G.opt.dailyDay = G.dailyDay; G.opt.dailyBest = 0; G.opt.dailyTries = 0; } G.opt.dailyTries++; saveCfg(); printf("daily: %u  %s\n", G.dailyDay, G.M.desc); }
     printf("game: mode %s mission %s players %d teams %d world %.0fx%.0f asteroids %d\n", MODENAMES[G.mode], G.M.name, nj, G.nTeams, G.WW, G.WH, (int)G.ast.size());
 }

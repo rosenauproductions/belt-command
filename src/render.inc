@@ -374,7 +374,8 @@ static void drawObjective(Canvas& cv, const Player& p, float u, float leftEdge, 
     case OBJ_MINE: line = "MINE " + std::to_string((int)T.mined) + " / " + std::to_string((int)G.M.target); prog = T.mined / G.M.target; break;
     case OBJ_SURVIVE: line = "SURVIVE " + mmss(std::max(0.f, G.M.target - G.time)); prog = G.time / G.M.target; break;
     case OBJ_MOTHER: if (!G.motherSpawned) line = "MOTHERSHIP IN " + mmss(std::max(0.f, G.M.target - G.time)); else { line = "DESTROY THE MOTHERSHIP"; Enemy* m = enemyByUid(G.motherUid); if (m) prog = 1 - m->hp / m->maxhp; } break;
-    case OBJ_ENDLESS: line = "TIME " + mmss(G.time) + "   WAVE " + std::to_string(G.waveN); break;
+    case OBJ_ENDLESS: line = (G.mode == MODE_DAILY ? "DAILY  " : "") + std::string("TIME ") + mmss(G.time) + "   WAVE " + std::to_string(G.waveN); break;
+    case OBJ_TUTORIAL: line = "TUTORIAL   MINED " + std::to_string((int)T.mined); break;
     case OBJ_RAID: { int alive = 0, found = 0; for (int t = 0; t < G.nTeams; t++) if (G.teams[t].alive && t != p.team) { alive++; if (T.found >> t & 1) found++; }
         line = "RIVALS " + std::to_string(alive) + "   FOUND " + std::to_string(found) + " / " + std::to_string(alive); break; }
     case OBJ_VERSUS: { int alive = 0; for (int t = 0; t < G.nTeams; t++) if (G.teams[t].alive && t != p.team) alive++; line = "RIVALS " + std::to_string(alive) + "   MINED " + std::to_string((int)T.mined) + " / " + std::to_string((int)G.M.target); prog = T.mined / G.M.target; break; }
@@ -390,11 +391,13 @@ static void drawObjective(Canvas& cv, const Player& p, float u, float leftEdge, 
         FONT.draw(cv, fl.c_str(), V2(cx, y + 40 * u), 13 * u, withA(T.order >= 0 ? T.col : C_DIM, 0.9f), 1);
         return;
     }
+    if (G.tutorial && G.alertT <= 0) return; // no timed waves in the tutorial
     std::string wl = G.waveT < 6 || G.alertT > 0 ? "WAVE INCOMING" : "NEXT WAVE " + mmss(G.waveT);
     Col wc = G.waveT < 6 || G.alertT > 0 ? withA(C_ALIEN, 0.6f + 0.4f * std::sin(G.time * 10)) : withA(C_DIM, 0.9f);
     FONT.draw(cv, wl.c_str(), V2(cx, y + 40 * u), 13 * u, wc, 1);
 }
 
+static void drawTutorial(Canvas& cv, Player& p, float u); // modes.inc
 static void drawHud(Canvas& cv, Player& p) {
     const SDL_Rect& vp = p.vp; float u = hudU(vp); Team& T = G.teams[p.team];
     float x = vp.x + 18 * u, y = vp.y + 16 * u;
@@ -483,6 +486,7 @@ static void drawHud(Canvas& cv, Player& p) {
             if (raid()) { snprintf(buf, sizeof buf, TC.on && touchPlayerIs(p) ? "%sATTACK SENDS FIGHTERS" : "%s SEND FIGHTERS HERE", TC.on && touchPlayerIs(p) ? "" : btnLab(p.dev, B_B)); FONT.draw(cv, buf, V2(px + 12 * u, py + 84 * u), 12 * u, withA(C_WHITE, 0.7f)); } }
     }
     if (TC.on && touchPlayerIs(p)) drawTouchUi(cv, p, u, sy);
+    drawTutorial(cv, p, u);
     if (p.toastT > 0) FONT.draw(cv, p.toast.c_str(), V2(vp.x + vp.w * 0.5f, sy - 52 * u), 18 * u, withA(Col(255, 210, 120), std::min(1.f, p.toastT * 2)), 1);
     if (!T.alive && rivals()) FONT.draw(cv, "COMMAND LOST", V2(vp.x + vp.w * 0.5f, vp.y + vp.h * 0.4f), 46 * u, withA(C_BAD, 0.9f), 1);
     if (p.devLost) FONT.draw(cv, "CONTROLLER DISCONNECTED", V2(vp.x + vp.w * 0.5f, vp.y + vp.h * 0.5f), 26 * u, C_BAD, 1);

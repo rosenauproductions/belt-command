@@ -15,9 +15,14 @@ Pick the mode in the lobby with left/right.
 | Co-op missions | One shared base and stockpile against alien waves. Seven missions. |
 | Co-op endless | One shared base. The waves never stop; survive as long as you can. |
 | Versus | Everyone has their own base, the aliens still come, and turrets fire on rivals too. Last command standing, or first to mine 5000. |
+| Daily challenge | One new belt every day (UTC), the same for everyone: the same asteroids and the same twist (scarce or rich belt, swarms, early attack, fast or tough waves, extra or fewer minerals). Share one base and survive as long as you can. Your best time and number of tries for the day are saved. |
 | Raid | No aliens. Your friends are the rivals, each with their own base in a corner. Rival bases stay hidden until your network (or your fighters) gets close. Build carriers and send fighters to destroy their command. Last command standing wins. Fighter weapons get stronger as the game goes on (x2 at 10 minutes), so a raid always ends. |
 
 With one human player, versus and raid add a CPU rival automatically. X / Y in the lobby add or remove more CPUs.
+
+## Tutorial
+
+Title > TUTORIAL (marked START HERE until it is finished once). One player, a calm belt that is the same every time, and no timed waves. Ten steps, each telling you what to do and which button does it on your controls (pad, keyboard + mouse or touch): look around, build a solar, a miner (the asteroid to use glows), a relay and a laser, fight off one small alien group, upgrade, build a battery, then mine 400 minerals. The icon to use glows in the build bar. When it ends, PLAY THE FIRST MISSION starts mission 1.
 
 ## Structures
 
@@ -151,7 +156,8 @@ Run under `xvfb-run` with these environment variables:
 | Variable | Effect |
 |---|---|
 | `BC_STATE=title\|help\|options\|lobby\|missions\|game\|icon\|logo` | Start in that screen |
-| `BC_MODE=coop\|endless\|versus\|raid`, `BC_MISSION=n` | Mode and mission (0-6) |
+| `BC_MODE=coop\|endless\|versus\|raid\|daily`, `BC_MISSION=n` | Mode and mission (0-6) |
+| `BC_TUTORIAL=1`, `BC_TUTBOT=1` | Start the tutorial (with `BC_STATE=game`); the tutorial bot does each step's action |
 | `BC_PLAYERS=n`, `BC_CPUS=n` | Human seats and extra CPU players |
 | `BC_BOTS=1` | CPU drives the human seats too |
 | `BC_ADVANCE=secs` | Simulate this many seconds before the first frame |
@@ -169,6 +175,8 @@ Run under `xvfb-run` with these environment variables:
 Example: `BC_MUTE=1 SDL_AUDIODRIVER=dummy BC_WINDOW=1920x1080 BC_STATE=game BC_MODE=endless BC_BOTS=1 BC_PLAYERS=4 BC_ADVANCE=300 BC_SHOT=10 BC_SHOT_PATH=shot.bmp xvfb-run -a -s "-screen 0 1920x1080x24" build/bc_test`
 
 ## Status
+
+- 7 Nov 2026: TUTORIAL (new title item) and DAILY CHALLENGE (new lobby mode). Online protocol is now 3 (the host tells guests the day), so the box and the website were updated together. Tested: the tutorial played start to finish by its test bot (all 10 steps, the alien group, the finish, saved as done), screenshots on TV and phone sizes; the daily twice with the same result (same belt), its lobby and results screens; a box host running the daily with an online guest; pad test 100 of 100; co-op, versus and raid bot games. Not yet tried by a person. A daily leaderboard (comparing scores online) is not built; it would need a small server.
 
 - 2 Nov 2026: getting ready to sell. Removed every reference to other games from the repo, added `LICENSE` (all rights reserved), `THIRD_PARTY_NOTICES.md` (SDL2 zlib, PeerJS and Emscripten MIT), `PRIVACY.md` and `/privacy.html`, a copyright line on the title screen, credits on HOW TO PLAY, and PRIVACY / LICENSES links on the web start page. Older commits in this private repo still mention the inspiration; squash the history before ever making the repo public.
 

@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <cstdint>
+#include <ctime>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -65,8 +67,8 @@ static const EDef ED[E_N] = {
     { "MOTHERSHIP", 3000, 24, 62, 20, 340, 0.5f, 100 },
 };
 
-enum { OBJ_MINE, OBJ_SURVIVE, OBJ_MOTHER, OBJ_ENDLESS, OBJ_VERSUS, OBJ_RAID };
-struct Mission { const char* name; const char* desc; int obj; float target, first, interval, diff, density; bool swarmy; };
+enum { OBJ_MINE, OBJ_SURVIVE, OBJ_MOTHER, OBJ_ENDLESS, OBJ_VERSUS, OBJ_RAID, OBJ_TUTORIAL };
+struct Mission { const char* name; const char* desc; int obj; float target, first, interval, diff, density; bool swarmy; float startMin = 0; };
 static const Mission MISSIONS[] = {
     { "FIRST LIGHT", "MINE 800 MINERALS. LIGHT RESISTANCE.", OBJ_MINE, 800, 50, 45, 0.6f, 1.1f, false },
     { "HOLDOUT", "SURVIVE FOR 4 MINUTES.", OBJ_SURVIVE, 240, 50, 40, 0.9f, 1.0f, false },
@@ -80,6 +82,26 @@ static const int NMISSIONS = sizeof(MISSIONS) / sizeof(MISSIONS[0]);
 static const Mission M_ENDLESS = { "ENDLESS", "SURVIVE AS LONG AS YOU CAN.", OBJ_ENDLESS, 0, 50, 36, 1.0f, 1.0f, false };
 static const Mission M_RAID = { "RAID", "NO ALIENS. FIND YOUR NEIGHBORS AND DESTROY THEIR COMMANDS.", OBJ_RAID, 0, 1e9f, 1e9f, 0, 1.0f, false };
 static const Mission M_VERSUS = { "VERSUS", "DESTROY RIVAL COMMANDS, OR MINE 5000 FIRST.", OBJ_VERSUS, 5000, 100, 45, 0.55f, 1.0f, false };
+// tutorial: no waves on a timer (the tutorial script sends one small group); finish by mining 400
+static const Mission M_TUTORIAL = { "TUTORIAL", "LEARN TO BUILD, MINE AND DEFEND.", OBJ_TUTORIAL, 400, 1e9f, 1e9f, 0.5f, 1.0f, false, 100 };
+// daily challenge: the same belt and the same twist for everyone on a UTC day; survive as long as you can
+static uint32_t dayHash(uint32_t day, uint32_t salt) { uint32_t h = day * 2654435761u ^ salt * 2246822519u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16; return h; }
+static Mission dailyMission(uint32_t day) {
+    static std::string desc; // the twist, in words
+    Mission m = { "DAILY CHALLENGE", "", OBJ_ENDLESS, 0, 50, 36, 1.0f, 1.0f, false };
+    std::vector<std::string> tw;
+    switch (dayHash(day, 1) % 3) { case 0: m.density = 0.65f; tw.push_back("SCARCE BELT"); break; case 2: m.density = 1.3f; tw.push_back("RICH BELT"); break; }
+    if (dayHash(day, 2) % 3 == 0) { m.swarmy = true; tw.push_back("SWARMS"); }
+    switch (dayHash(day, 3) % 4) { case 0: m.first = 30; tw.push_back("EARLY ATTACK"); break; case 1: m.interval = 30; tw.push_back("FAST WAVES"); break; case 2: m.diff = 1.2f; tw.push_back("TOUGH WAVES"); break; }
+    switch (dayHash(day, 4) % 3) { case 0: m.startMin = 250; tw.push_back("EXTRA MINERALS"); break; case 1: m.startMin = -80; tw.push_back("SHORT ON MINERALS"); break; }
+    if (tw.empty()) tw.push_back("A CLASSIC BELT");
+    desc.clear(); for (size_t i = 0; i < tw.size(); i++) desc += (i ? ".  " : "") + tw[i];
+    desc += ".  SURVIVE AS LONG AS YOU CAN.";
+    m.desc = desc.c_str(); return m;
+}
+static uint32_t todayUTC() { time_t t = time(nullptr); struct tm g; gmtime_r(&t, &g); return (uint32_t)((g.tm_year + 1900) * 10000 + (g.tm_mon + 1) * 100 + g.tm_mday); }
+static std::string dayText(uint32_t d) { static const char* MON[12] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+    return std::to_string(d % 100) + " " + MON[(d / 100 % 100 + 11) % 12] + " " + std::to_string(d / 10000); }
 
 static const Col PCOL[4] = { Col(40, 220, 255), Col(255, 160, 40), Col(130, 255, 90), Col(255, 90, 210) };
 static const Col C_CRY(80, 255, 215), C_MIN(190, 140, 255), C_EN(250, 235, 100), C_ALIEN(255, 70, 70), C_AST(125, 145, 180), C_WHITE(255, 255, 255), C_DIM(120, 135, 160), C_GOOD(110, 255, 140), C_BAD(255, 80, 80);
@@ -127,12 +149,12 @@ struct Player {
 };
 
 enum { ST_TITLE, ST_HELP, ST_OPTIONS, ST_LOBBY, ST_MISSIONS, ST_GAME, ST_ICON, ST_LOGO, ST_JOIN, ST_TEXT, ST_NET };
-enum { MODE_COOP, MODE_ENDLESS, MODE_VERSUS, MODE_RAID, MODE_N };
-static const char* MODENAMES[MODE_N] = { "CO-OP MISSIONS", "CO-OP ENDLESS", "VERSUS", "RAID" };
+enum { MODE_COOP, MODE_ENDLESS, MODE_VERSUS, MODE_RAID, MODE_DAILY, MODE_N };
+static const char* MODENAMES[MODE_N] = { "CO-OP MISSIONS", "CO-OP ENDLESS", "VERSUS", "RAID", "DAILY CHALLENGE" };
 static const char* RESNAMES[5] = { "AUTO", "1280 X 720", "1920 X 1080", "2560 X 1440", "3840 X 2160" };
 static const int RESH[5] = { 0, 720, 1080, 1440, 2160 };
 
-struct Opts { int res = 0; bool glow = true, shake = true; int sfx = 8, mus = 5; unsigned done = 0; int bestEndless = 0; std::string name, token; };
+struct Opts { int res = 0; bool glow = true, shake = true; int sfx = 8, mus = 5; unsigned done = 0; int bestEndless = 0; std::string name, token; uint32_t dailyDay = 0; int dailyBest = 0, dailyTries = 0; bool tutDone = false; };
 
 struct Game {
     SDL_Window* win = nullptr; SDL_Renderer* ren = nullptr; SDL_Texture* target = nullptr;
@@ -147,6 +169,7 @@ struct Game {
     bool paused = false; int pauseSel = 0; int pauser = -1;
     int result = 0; float resultT = 0; int winner = -1; int resultSel = 0; std::string resultMsg;
     bool quit = false; float alertT = 0; int gameId = 0;
+    uint32_t dailyDay = 0; bool tutorial = false; bool dailyNewBest = false; // daily challenge day (YYYYMMDD, UTC); tutorial game
     // test switches
     int shotFrame = -1; std::string shotPath = "shot.bmp"; bool bots = false; int fast = 1; int frame = 0;
 } G;
@@ -160,7 +183,7 @@ static bool seen(int viewerTeam, int team) { return !raid() || viewerTeam < 0 ||
 // ---------------------------------------------------------------- config
 static void saveCfg() {
     FILE* f = fopen(G.cfgPath.c_str(), "w"); if (!f) return;
-    fprintf(f, "res=%d\nglow=%d\nshake=%d\nsfx=%d\nmusic=%d\ndone=%u\nbest_endless=%d\nname=%s\ntoken=%s\n", G.opt.res, G.opt.glow, G.opt.shake, G.opt.sfx, G.opt.mus, G.opt.done, G.opt.bestEndless, G.opt.name.c_str(), G.opt.token.c_str());
+    fprintf(f, "res=%d\nglow=%d\nshake=%d\nsfx=%d\nmusic=%d\ndone=%u\nbest_endless=%d\nname=%s\ntoken=%s\ndaily_day=%u\ndaily_best=%d\ndaily_tries=%d\ntutorial_done=%d\n", G.opt.res, G.opt.glow, G.opt.shake, G.opt.sfx, G.opt.mus, G.opt.done, G.opt.bestEndless, G.opt.name.c_str(), G.opt.token.c_str(), G.opt.dailyDay, G.opt.dailyBest, G.opt.dailyTries, G.opt.tutDone ? 1 : 0);
     fclose(f);
 #ifdef __EMSCRIPTEN__ // the browser keeps settings in localStorage
     EM_ASM({ try { localStorage.setItem('beltcommand.cfg', FS.readFile(UTF8ToString($0), { encoding: 'utf8' })); } catch (e) {} }, G.cfgPath.c_str());
@@ -180,6 +203,7 @@ static void loadCfg() {
         if (s == "res") G.opt.res = (int)clampf((float)v, 0, 4); else if (s == "glow") G.opt.glow = v != 0; else if (s == "shake") G.opt.shake = v != 0;
         else if (s == "sfx") G.opt.sfx = (int)clampf((float)v, 0, 10); else if (s == "music") G.opt.mus = (int)clampf((float)v, 0, 10);
         else if (s == "done") G.opt.done = (unsigned)v; else if (s == "best_endless") G.opt.bestEndless = (int)v;
+        else if (s == "daily_day") G.opt.dailyDay = (uint32_t)v; else if (s == "daily_best") G.opt.dailyBest = (int)v; else if (s == "daily_tries") G.opt.dailyTries = (int)v; else if (s == "tutorial_done") G.opt.tutDone = v != 0;
     }
     fclose(f);
 }
@@ -401,9 +425,15 @@ static const char* canPlace(int team, int t, V2 q) {
     return nullptr;
 }
 
+static Mission currentMission() {
+    if (G.tutorial) return M_TUTORIAL;
+    return G.mode == MODE_RAID ? M_RAID : G.mode == MODE_VERSUS ? M_VERSUS : G.mode == MODE_ENDLESS ? M_ENDLESS : G.mode == MODE_DAILY ? dailyMission(G.dailyDay) : MISSIONS[G.mission];
+}
+static void tutStart(); static void tutUpdate(float dt); // modes.inc
 #include "sim.inc"
 #include "touch.h"
 #include "render.inc"
+#include "modes.inc"
 #include "qr.h"
 #include "net.inc"
 #include "touch.inc"
